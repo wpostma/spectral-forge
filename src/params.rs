@@ -32,8 +32,9 @@ pub struct SpectralForgeParams {
     #[persist = "curve_nodes"]
     pub curve_nodes: Arc<Mutex<[[CurveNode; NUM_NODES]; NUM_CURVE_SETS]>>,
 
+    // Slot order is fixed by curve_idx constants — never reorder them.
     #[persist = "active_curve"]
-    pub active_curve: Arc<Mutex<usize>>,
+    pub active_curve: Arc<Mutex<u8>>,
 
     #[id = "input_gain"]
     pub input_gain: FloatParam,
@@ -78,9 +79,9 @@ pub struct SpectralForgeParams {
     pub delta_monitor: BoolParam,
 }
 
-impl SpectralForgeParams {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+impl Default for SpectralForgeParams {
+    fn default() -> Self {
+        Self {
             editor_state: EguiState::from_size(900, 600),
             curve_nodes: Arc::new(Mutex::new(
                 [crate::editor::curve::default_nodes(); NUM_CURVE_SETS]
@@ -90,13 +91,13 @@ impl SpectralForgeParams {
             input_gain: FloatParam::new(
                 "Input Gain", 0.0,
                 FloatRange::Linear { min: -18.0, max: 18.0 },
-            ).with_smoother(SmoothingStyle::Logarithmic(20.0))
+            ).with_smoother(SmoothingStyle::Linear(20.0))
              .with_unit(" dB"),
 
             output_gain: FloatParam::new(
                 "Output Gain", 0.0,
                 FloatRange::Linear { min: -18.0, max: 18.0 },
-            ).with_smoother(SmoothingStyle::Logarithmic(20.0))
+            ).with_smoother(SmoothingStyle::Linear(20.0))
              .with_unit(" dB"),
 
             mix: FloatParam::new(
@@ -124,7 +125,7 @@ impl SpectralForgeParams {
             sc_gain: FloatParam::new(
                 "SC Gain", 0.0,
                 FloatRange::Linear { min: -18.0, max: 18.0 },
-            ).with_smoother(SmoothingStyle::Logarithmic(20.0))
+            ).with_smoother(SmoothingStyle::Linear(20.0))
              .with_unit(" dB"),
 
             sc_attack_ms: FloatParam::new(
@@ -148,6 +149,6 @@ impl SpectralForgeParams {
             threshold_mode: EnumParam::new("Threshold Mode", ThresholdMode::Absolute),
             auto_makeup: BoolParam::new("Auto Makeup", false),
             delta_monitor: BoolParam::new("Delta Monitor", false),
-        })
+        }
     }
 }

@@ -12,7 +12,7 @@ pub struct SpectralForge {
 
 impl Default for SpectralForge {
     fn default() -> Self {
-        Self { params: SpectralForgeParams::new() }
+        Self { params: Arc::new(SpectralForgeParams::default()) }
     }
 }
 
