@@ -1,0 +1,31 @@
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
+[package]
+name = "spectral_forge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+realfft = "3"
+triple_buffer = "9"
+parking_lot = "0.12"
+num-complex = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+lto = "thin"
+opt-level = 3
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1
