@@ -1,5 +1,6 @@
 pub mod dsp;
 pub mod editor;
+pub mod editor_ui;
 pub mod params;
 pub mod bridge;
 
@@ -40,6 +41,10 @@ impl Plugin for SpectralForge {
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> { self.params.clone() }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor_ui::create_editor(self.params.clone())
+    }
 
     fn initialize(
         &mut self,
