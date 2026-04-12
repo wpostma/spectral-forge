@@ -13,9 +13,11 @@ pub struct SpectralForge {
     pipeline: Option<dsp::pipeline::Pipeline>,
     shared:   Option<bridge::SharedState>,
     // Cloned Arc handles for the GUI — set in initialize(), before editor() is called
-    gui_curve_tx:    Vec<Arc<parking_lot::Mutex<triple_buffer::Input<Vec<f32>>>>>,
-    gui_sample_rate: Option<Arc<bridge::AtomicF32>>,
-    gui_num_bins:    usize,
+    gui_curve_tx:       Vec<Arc<parking_lot::Mutex<triple_buffer::Input<Vec<f32>>>>>,
+    gui_sample_rate:    Option<Arc<bridge::AtomicF32>>,
+    gui_num_bins:       usize,
+    gui_spectrum_rx:    Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
+    gui_suppression_rx: Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
 }
 
 impl Default for SpectralForge {
@@ -24,9 +26,11 @@ impl Default for SpectralForge {
             params:   Arc::new(SpectralForgeParams::default()),
             pipeline: None,
             shared:   None,
-            gui_curve_tx:    Vec::new(),
-            gui_sample_rate: None,
-            gui_num_bins:    0,
+            gui_curve_tx:       Vec::new(),
+            gui_sample_rate:    None,
+            gui_num_bins:       0,
+            gui_spectrum_rx:    None,
+            gui_suppression_rx: None,
         }
     }
 }
@@ -55,6 +59,8 @@ impl Plugin for SpectralForge {
             self.gui_curve_tx.clone(),
             self.gui_sample_rate.clone(),
             self.gui_num_bins,
+            self.gui_spectrum_rx.clone(),
+            self.gui_suppression_rx.clone(),
         )
     }
 
@@ -72,9 +78,11 @@ impl Plugin for SpectralForge {
         self.pipeline = Some(dsp::pipeline::Pipeline::new(sr, num_ch));
         context.set_latency_samples(dsp::pipeline::FFT_SIZE as u32);
         if let Some(ref sh) = self.shared {
-            self.gui_curve_tx    = sh.curve_tx.clone();
-            self.gui_sample_rate = Some(sh.sample_rate.clone());
-            self.gui_num_bins    = sh.num_bins;
+            self.gui_curve_tx       = sh.curve_tx.clone();
+            self.gui_sample_rate    = Some(sh.sample_rate.clone());
+            self.gui_num_bins       = sh.num_bins;
+            self.gui_spectrum_rx    = Some(sh.spectrum_rx.clone());
+            self.gui_suppression_rx = Some(sh.suppression_rx.clone());
         }
         true
     }

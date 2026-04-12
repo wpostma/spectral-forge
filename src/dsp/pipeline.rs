@@ -13,9 +13,10 @@ pub struct Pipeline {
     fft_plan:  std::sync::Arc<dyn realfft::RealToComplex<f32>>,
     ifft_plan: std::sync::Arc<dyn realfft::ComplexToReal<f32>>,
     window:         Vec<f32>,
-    spectrum_buf:   Vec<f32>,
+    spectrum_buf:    Vec<f32>,
     suppression_buf: Vec<f32>,
-    complex_buf:    Vec<Complex<f32>>,
+    channel_supp_buf: Vec<f32>,
+    complex_buf:     Vec<Complex<f32>>,
     engine: Box<dyn SpectralEngine>,
     bp_threshold: Vec<f32>,
     bp_ratio:     Vec<f32>,
@@ -48,8 +49,9 @@ impl Pipeline {
             fft_plan,
             ifft_plan,
             window,
-            spectrum_buf:    vec![0.0; NUM_BINS],
-            suppression_buf: vec![0.0; NUM_BINS],
+            spectrum_buf:     vec![0.0; NUM_BINS],
+            suppression_buf:  vec![0.0; NUM_BINS],
+            channel_supp_buf: vec![0.0; NUM_BINS],
             complex_buf,
             engine,
             bp_threshold: vec![-20.0; NUM_BINS],
@@ -141,10 +143,14 @@ impl Pipeline {
         let fft_plan  = self.fft_plan.clone();
         let ifft_plan = self.ifft_plan.clone();
         let window         = &self.window;
-        let engine         = &mut self.engine;
-        let complex_buf    = &mut self.complex_buf;
-        let spectrum_buf   = &mut self.spectrum_buf;
-        let suppression_buf = &mut self.suppression_buf;
+        let engine            = &mut self.engine;
+        let complex_buf       = &mut self.complex_buf;
+        let spectrum_buf      = &mut self.spectrum_buf;
+        let suppression_buf   = &mut self.suppression_buf;
+        let channel_supp_buf  = &mut self.channel_supp_buf;
+        // Reset accumulators for peak-hold across channels
+        for v in spectrum_buf.iter_mut()   { *v = 0.0; }
+        for v in suppression_buf.iter_mut() { *v = 0.0; }
         let bp_threshold = &self.bp_threshold;
         let bp_ratio     = &self.bp_ratio;
         let bp_attack    = &self.bp_attack;
@@ -168,12 +174,9 @@ impl Pipeline {
 
             fft_plan.process(block, complex_buf).unwrap();
 
-            // FIXME(multichannel): spectrum_buf and suppression_buf are overwritten
-            // per channel; with stereo audio only the last channel's data reaches the
-            // GUI. Fix in Task 13 (spectrum/suppression display) by accumulating a
-            // peak-hold across channels before the publish call.
             for (i, c) in complex_buf.iter().enumerate() {
-                spectrum_buf[i] = c.norm();
+                let mag = c.norm();
+                if mag > spectrum_buf[i] { spectrum_buf[i] = mag; }
             }
 
             let params = BinParams {
@@ -186,7 +189,10 @@ impl Pipeline {
                 mix:          bp_mix,
             };
 
-            engine.process_bins(complex_buf, None, &params, sample_rate, suppression_buf);
+            engine.process_bins(complex_buf, None, &params, sample_rate, channel_supp_buf);
+            for k in 0..channel_supp_buf.len() {
+                if channel_supp_buf[k] > suppression_buf[k] { suppression_buf[k] = channel_supp_buf[k]; }
+            }
 
             ifft_plan.process(complex_buf, block).unwrap();
 

@@ -14,6 +14,8 @@ pub fn create_editor(
     curve_tx: Vec<Arc<Mutex<TbInput<Vec<f32>>>>>,
     sample_rate: Option<Arc<crate::bridge::AtomicF32>>,
     num_bins: usize,
+    spectrum_rx: Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
+    suppression_rx: Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         params.editor_state.clone(),
@@ -63,6 +65,21 @@ pub fn create_editor(
                     ui.allocate_rect(curve_rect, egui::Sense::hover());
                     let mut nodes = params.curve_nodes.lock()[active_idx];
                     let sr = sample_rate.as_ref().map(|a| a.load()).unwrap_or(44100.0);
+
+                    // Spectrum background bars
+                    if let Some(ref rx_arc) = spectrum_rx {
+                        if let Some(mut rx) = rx_arc.try_lock() {
+                            let mags = rx.read().clone();
+                            crate::editor::spectrum_display::paint_spectrum(ui.painter(), curve_rect, &mags);
+                        }
+                    }
+                    // Suppression stalactites (top)
+                    if let Some(ref rx_arc) = suppression_rx {
+                        if let Some(mut rx) = rx_arc.try_lock() {
+                            let supp = rx.read().clone();
+                            crate::editor::suppression_display::paint_suppression(ui.painter(), curve_rect, &supp);
+                        }
+                    }
 
                     // Paint response curve (using display resolution of 512 bins), cached per frame
                     let cache_key = ui.id().with("display_gains");
