@@ -73,22 +73,68 @@ impl Pipeline {
         &mut self,
         buffer: &mut nih_plug::buffer::Buffer,
         shared: &mut SharedState,
+        params: &crate::params::SpectralForgeParams,
     ) {
-        // Pull latest curve data from GUI (lock-free triple-buffer reads)
-        {
-            let slices: [&mut Vec<f32>; 7] = [
-                &mut self.bp_threshold, &mut self.bp_ratio,
-                &mut self.bp_attack,   &mut self.bp_release,
-                &mut self.bp_knee,     &mut self.bp_makeup,
-                &mut self.bp_mix,
-            ];
-            for (dst, rx) in slices.into_iter().zip(shared.curve_rx.iter_mut()) {
-                let latest = rx.read();
-                if latest.len() == dst.len() {
-                    dst.copy_from_slice(latest);
-                }
-            }
+        // Read smoothed global parameter values (call next() once per block, not per sample)
+        let attack_ms_base  = params.attack_ms.smoothed.next();
+        let release_ms_base = params.release_ms.smoothed.next();
+        let freq_scale      = params.freq_scale.smoothed.next();
+        let input_gain_db   = params.input_gain.smoothed.next();
+        let output_gain_db  = params.output_gain.smoothed.next();
+        let global_mix      = params.mix.smoothed.next();
+
+        // Read all 7 curve channels once.
+        // Each read() requires &mut on its TbOutput; clone immediately so the
+        // borrow ends before the next index is touched.
+        let thresh_curve:  Vec<f32> = shared.curve_rx[0].read().clone();
+        let ratio_curve:   Vec<f32> = shared.curve_rx[1].read().clone();
+        let attack_curve:  Vec<f32> = shared.curve_rx[2].read().clone();
+        let release_curve: Vec<f32> = shared.curve_rx[3].read().clone();
+        let knee_curve:    Vec<f32> = shared.curve_rx[4].read().clone();
+        let makeup_curve:  Vec<f32> = shared.curve_rx[5].read().clone();
+        let mix_curve:     Vec<f32> = shared.curve_rx[6].read().clone();
+
+        // Map to physical units, bin by bin
+        let sample_rate = self.sample_rate;
+        let num_bins = self.bp_threshold.len();
+
+        for k in 0..num_bins {
+            // Threshold: curve gain 1.0 → -20 dBFS base; range mapped to -60…0 dBFS.
+            // flat curve (gain=1.0) → threshold = -20 dBFS
+            // curve gain 0.0 → -60 dBFS (very low threshold = lots of compression)
+            // curve gain 2.0 → 0 dBFS (threshold above max = no compression)
+            // Linear interp: threshold_db = -20.0 + (gain - 1.0) * 20.0
+            let t = thresh_curve.get(k).copied().unwrap_or(1.0);
+            self.bp_threshold[k] = (-20.0 + (t - 1.0) * 20.0).clamp(-60.0, 0.0);
+
+            // Ratio: curve gain 1.0 → ratio 1:1; gain 8.0 → ratio 8:1 (max)
+            let r = ratio_curve.get(k).copied().unwrap_or(1.0);
+            self.bp_ratio[k] = r.clamp(1.0, 20.0);
+
+            // Frequency-dependent timing: lower frequencies get longer times
+            let f_bin = (k as f32 * sample_rate / crate::dsp::pipeline::FFT_SIZE as f32).max(20.0);
+            let scale = (1000.0_f32 / f_bin).powf(freq_scale * 0.5); // freq_scale ∈ [0,1]
+            let atk_factor = attack_curve.get(k).copied().unwrap_or(1.0).max(0.01);
+            let rel_factor = release_curve.get(k).copied().unwrap_or(1.0).max(0.01);
+            self.bp_attack[k]  = (attack_ms_base  * scale * atk_factor).clamp(0.1, 500.0);
+            self.bp_release[k] = (release_ms_base * scale * rel_factor).clamp(1.0, 2000.0);
+
+            // Knee: curve gain 1.0 → 6 dB knee; range 0…24 dB
+            let kn = knee_curve.get(k).copied().unwrap_or(1.0);
+            self.bp_knee[k] = (kn * 6.0).clamp(0.0, 24.0);
+
+            // Makeup: curve gain as dB (1.0 → 0 dB, >1 → positive makeup)
+            let mk = makeup_curve.get(k).copied().unwrap_or(1.0);
+            self.bp_makeup[k] = if mk > 1e-6 { 20.0 * mk.log10() } else { -96.0 };
+
+            // Mix: curve gain 1.0 → full wet; scaled so 1.0 is 100%
+            let mx = mix_curve.get(k).copied().unwrap_or(1.0);
+            self.bp_mix[k] = (mx * global_mix).clamp(0.0, 1.0);
         }
+
+        // Precompute input/output linear gains for capture into STFT closure
+        let input_linear  = 10.0f32.powf(input_gain_db  / 20.0);
+        let output_linear = 10.0f32.powf(output_gain_db / 20.0);
 
         // Reborrow fields as locals so the closure can capture them without
         // conflicting with the &mut self.stft borrow inside process_overlap_add.
@@ -112,9 +158,9 @@ impl Pipeline {
         let norm = 2.0_f32 / (3.0 * FFT_SIZE as f32);
 
         self.stft.process_overlap_add(buffer, OVERLAP, |_channel, block| {
-            // Analysis window
+            // Analysis window + input gain
             for (s, &w) in block.iter_mut().zip(window.iter()) {
-                *s *= w;
+                *s *= w * input_linear;
             }
 
             // Guard: clamp NaN/Inf from broken drivers before FFT.
@@ -144,9 +190,9 @@ impl Pipeline {
 
             ifft_plan.process(complex_buf, block).unwrap();
 
-            // Synthesis window + IFFT normalization
+            // Synthesis window + IFFT normalization + output gain
             for (s, &w) in block.iter_mut().zip(window.iter()) {
-                *s *= w * norm;
+                *s *= w * norm * output_linear;
             }
         });
 

@@ -72,7 +72,7 @@ impl Plugin for SpectralForge {
     ) -> ProcessStatus {
         dsp::guard::flush_denormals();
         if let (Some(pipeline), Some(shared)) = (&mut self.pipeline, &mut self.shared) {
-            pipeline.process(buffer, shared);
+            pipeline.process(buffer, shared, &self.params);
         }
         ProcessStatus::Normal
     }
