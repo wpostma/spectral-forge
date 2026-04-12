@@ -138,14 +138,13 @@ impl Pipeline {
                 crate::dsp::guard::sanitize(block);
                 fft_plan.process(block, sc_complex).unwrap();
 
+                let hops_per_sec = sample_rate / hop as f32;
                 for k in 0..sc_complex.len() {
                     let mag = sc_complex[k].norm();
                     let coeff = if mag > sc_env_state[k] {
-                        let hops_per_sec = sample_rate / hop as f32;
                         let time_hops = sc_attack_ms.max(0.1) * 0.001 * hops_per_sec;
                         (-1.0_f32 / time_hops).exp()
                     } else {
-                        let hops_per_sec = sample_rate / hop as f32;
                         let time_hops = sc_release_ms.max(1.0) * 0.001 * hops_per_sec;
                         (-1.0_f32 / time_hops).exp()
                     };
