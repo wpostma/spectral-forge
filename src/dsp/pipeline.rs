@@ -117,9 +117,14 @@ impl Pipeline {
                 *s *= w;
             }
 
+            // Guard: clamp NaN/Inf from broken drivers before FFT.
+            crate::dsp::guard::sanitize(block);
+
             fft_plan.process(block, complex_buf).unwrap();
 
-            // Record magnitude spectrum for GUI
+            // FIXME(multichannel): spectrum_buf and suppression_buf are overwritten
+            // per channel; with stereo audio only the last channel's data reaches the
+            // GUI. Fix in Task 10 by averaging/maxing across channels before publishing.
             for (i, c) in complex_buf.iter().enumerate() {
                 spectrum_buf[i] = c.norm();
             }
