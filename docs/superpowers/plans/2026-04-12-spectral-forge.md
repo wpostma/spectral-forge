@@ -63,7 +63,7 @@ crate-type = ["cdylib"]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 realfft = "3"
-triple_buffer = "0.9"
+triple_buffer = "9"
 parking_lot = "0.12"
 num-complex = "0.4"
 serde = { version = "1", features = ["derive"] }
