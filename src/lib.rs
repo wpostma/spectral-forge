@@ -1,7 +1,7 @@
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
-mod dsp;
+pub mod dsp;
 
 #[derive(Params)]
 struct SpectralForgeParams {}
