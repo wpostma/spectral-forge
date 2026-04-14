@@ -143,29 +143,34 @@ impl Default for SpectralForgeParams {
                 "Input Gain", 0.0,
                 FloatRange::Linear { min: -18.0, max: 18.0 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" dB"),
 
             output_gain: FloatParam::new(
                 "Output Gain", 0.0,
                 FloatRange::Linear { min: -18.0, max: 18.0 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" dB"),
 
             mix: FloatParam::new(
                 "Mix", 1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
-            ).with_smoother(SmoothingStyle::Linear(50.0)),
+            ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01),
 
             attack_ms: FloatParam::new(
                 "Attack", 10.0,
                 FloatRange::Skewed { min: 0.5, max: 200.0, factor: FloatRange::skew_factor(-2.0) },
             ).with_smoother(SmoothingStyle::Logarithmic(50.0))
+             .with_step_size(0.01)
              .with_unit(" ms"),
 
             release_ms: FloatParam::new(
                 "Release", 80.0,
                 FloatRange::Skewed { min: 1.0, max: 500.0, factor: FloatRange::skew_factor(-2.0) },
             ).with_smoother(SmoothingStyle::Logarithmic(50.0))
+             .with_step_size(0.01)
              .with_unit(" ms"),
 
             freq_scale: FloatParam::new(
@@ -178,24 +183,28 @@ impl Default for SpectralForgeParams {
                 "SC Gain", 0.0,
                 FloatRange::Linear { min: -18.0, max: 18.0 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" dB"),
 
             sc_attack_ms: FloatParam::new(
                 "SC Attack", 5.0,
                 FloatRange::Skewed { min: 0.5, max: 100.0, factor: FloatRange::skew_factor(-2.0) },
             ).with_smoother(SmoothingStyle::Logarithmic(50.0))
+             .with_step_size(0.01)
              .with_unit(" ms"),
 
             sc_release_ms: FloatParam::new(
                 "SC Release", 50.0,
                 FloatRange::Skewed { min: 1.0, max: 300.0, factor: FloatRange::skew_factor(-2.0) },
             ).with_smoother(SmoothingStyle::Logarithmic(50.0))
+             .with_step_size(0.01)
              .with_unit(" ms"),
 
             lookahead_ms: FloatParam::new(
                 "Lookahead", 0.0,
                 FloatRange::Linear { min: 0.0, max: 10.0 },
-            ).with_unit(" ms"),
+            ).with_step_size(0.01)
+             .with_unit(" ms"),
 
             stereo_link: EnumParam::new("Stereo Link", StereoLink::Linked),
             threshold_mode: EnumParam::new("Threshold Mode", ThresholdMode::Absolute),
@@ -204,12 +213,14 @@ impl Default for SpectralForgeParams {
                 "Threshold Slope", 0.0,
                 FloatRange::Linear { min: -6.0, max: 6.0 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" dB/oct"),
 
             threshold_offset: FloatParam::new(
                 "Threshold Offset", 0.0,
                 FloatRange::Linear { min: -40.0, max: 40.0 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" dB"),
 
             sensitivity: FloatParam::new(
@@ -222,6 +233,7 @@ impl Default for SpectralForgeParams {
                 "Suppression Width", 0.2,
                 FloatRange::Linear { min: 0.0, max: 0.5 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" st"),
 
             auto_makeup: BoolParam::new("Auto Makeup", false),
@@ -239,6 +251,7 @@ impl Default for SpectralForgeParams {
                 "Spectral Contrast", 6.0,
                 FloatRange::Linear { min: -12.0, max: 12.0 },
             ).with_smoother(SmoothingStyle::Linear(50.0))
+             .with_step_size(0.01)
              .with_unit(" dB"),
         }
     }
