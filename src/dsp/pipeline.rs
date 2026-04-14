@@ -8,9 +8,13 @@ pub const FFT_SIZE: usize = 2048;
 pub const NUM_BINS: usize = FFT_SIZE / 2 + 1;
 pub const OVERLAP: usize = 4; // 75% overlap → hop = 512
 
-/// Maximum block size assumed for the delta monitor dry buffer.
+/// Maximum block size assumed for the delta monitor dry-delay ring buffer.
 /// nih-plug typically processes in blocks of ≤ 8192 samples.
 const MAX_BLOCK_SIZE: usize = 8192;
+
+/// Ring-buffer size per channel for the dry-signal delay in the delta monitor.
+/// Must be ≥ FFT_SIZE + MAX_BLOCK_SIZE so the ring never overwrites samples still needed.
+const DRY_DELAY_SIZE: usize = FFT_SIZE + MAX_BLOCK_SIZE;
 
 pub struct Pipeline {
     stft: StftHelper,
@@ -34,9 +38,12 @@ pub struct Pipeline {
     bp_knee:      Vec<f32>,
     bp_makeup:    Vec<f32>,
     bp_mix:       Vec<f32>,
-    /// Pre-allocated dry signal buffer for delta monitor: [ch0 samples | ch1 samples]
-    /// Layout: channel c starts at c * MAX_BLOCK_SIZE.
-    dry_buf: Vec<f32>,
+    /// Ring buffer for delta monitor dry-signal delay: 2 channels × DRY_DELAY_SIZE entries.
+    /// Channel c occupies [c * DRY_DELAY_SIZE .. (c+1) * DRY_DELAY_SIZE].
+    /// Delayed by FFT_SIZE samples to align dry with STFT-latency-compensated wet.
+    dry_delay: Vec<f32>,
+    /// Current write head into dry_delay (wraps at DRY_DELAY_SIZE).
+    dry_delay_write: usize,
     /// Pre-allocated curve read caches — populated via copy_from_slice each block
     /// so the audio thread never allocates. One Vec per curve channel (7 total).
     curve_cache: [Vec<f32>; 7],
@@ -84,8 +91,8 @@ impl Pipeline {
             bp_knee:      vec![6.0;   NUM_BINS],
             bp_makeup:    vec![0.0;   NUM_BINS],
             bp_mix:       vec![1.0;   NUM_BINS],
-            // 2 channels × MAX_BLOCK_SIZE for delta monitor dry capture
-            dry_buf: vec![0.0f32; 2 * MAX_BLOCK_SIZE],
+            dry_delay: vec![0.0f32; 2 * DRY_DELAY_SIZE],
+            dry_delay_write: 0,
             curve_cache: std::array::from_fn(|_| vec![1.0f32; NUM_BINS]),
             sample_rate,
         }
@@ -97,7 +104,8 @@ impl Pipeline {
         self.sc_stft = StftHelper::new(2, FFT_SIZE, 0);
         self.sc_envelope  = vec![0.0f32; NUM_BINS];
         self.sc_env_state = vec![0.0f32; NUM_BINS];
-        self.dry_buf.fill(0.0);
+        self.dry_delay.fill(0.0);
+        self.dry_delay_write = 0;
         self.engine.reset(sample_rate, FFT_SIZE);
         self.engine_r.reset(sample_rate, FFT_SIZE);
     }
@@ -114,12 +122,13 @@ impl Pipeline {
         // Without this, calling next() once per block only steps 1/block_size of the way
         // through a smoother configured for N samples, making changes N× too slow.
         let block_size = buffer.samples() as u32;
-        let attack_ms_base  = params.attack_ms.smoothed.next_step(block_size);
-        let release_ms_base = params.release_ms.smoothed.next_step(block_size);
-        let freq_scale      = params.freq_scale.smoothed.next_step(block_size);
-        let input_gain_db   = params.input_gain.smoothed.next_step(block_size);
-        let output_gain_db  = params.output_gain.smoothed.next_step(block_size);
-        let global_mix      = params.mix.smoothed.next_step(block_size);
+        let attack_ms_base    = params.attack_ms.smoothed.next_step(block_size);
+        let release_ms_base   = params.release_ms.smoothed.next_step(block_size);
+        let freq_scale        = params.freq_scale.smoothed.next_step(block_size);
+        let input_gain_db     = params.input_gain.smoothed.next_step(block_size);
+        let output_gain_db    = params.output_gain.smoothed.next_step(block_size);
+        let global_mix        = params.mix.smoothed.next_step(block_size);
+        let suppression_width = params.suppression_width.smoothed.next_step(block_size);
 
         // Read all 7 curve channels into pre-allocated cache buffers (no allocation).
         // Each read() borrow ends before the next copy_from_slice begins.
@@ -133,7 +142,6 @@ impl Pipeline {
 
         // --- Sidechain processing ---
         let sc_active = !aux.inputs.is_empty();
-        shared.sidechain_active.store(sc_active, std::sync::atomic::Ordering::Relaxed);
 
         let sc_gain_db    = params.sc_gain.smoothed.next_step(block_size);
         let sc_gain_lin   = 10.0f32.powf(sc_gain_db / 20.0);
@@ -237,21 +245,24 @@ impl Pipeline {
         let input_linear  = 10.0f32.powf(input_gain_db  / 20.0);
         let output_linear = 10.0f32.powf(output_gain_db / 20.0);
 
+        // If the sidechain bus exists but is silent (e.g. nothing connected in DAW),
+        // fall back to self-detection so normal compression still works.
+        let sc_has_signal = sc_active && self.sc_envelope.iter().any(|&v| v > 1e-9);
+        shared.sidechain_active.store(sc_has_signal, std::sync::atomic::Ordering::Relaxed);
+
         // Capture sc_envelope before the mutable borrow of self.stft
         let sc_envelope = &self.sc_envelope;
-        let sidechain_arg: Option<&[f32]> = if sc_active { Some(sc_envelope) } else { None };
+        let sidechain_arg: Option<&[f32]> = if sc_has_signal { Some(sc_envelope) } else { None };
 
-        // Delta monitor: capture dry signal before any processing.
-        // MAX_BLOCK_SIZE is an assumed upper bound on nih-plug block sizes.
+        // Delta monitor: write dry samples into the ring buffer at the current write head.
+        // They will be read back (delayed by FFT_SIZE) after STFT to align with wet latency.
         if delta_monitor {
             let mut dry_idx = 0usize;
             for sample_block in buffer.iter_samples() {
                 debug_assert!(dry_idx < MAX_BLOCK_SIZE, "block size exceeded MAX_BLOCK_SIZE={MAX_BLOCK_SIZE}");
+                let pos = (self.dry_delay_write + dry_idx) % DRY_DELAY_SIZE;
                 for (ch_idx, sample) in sample_block.into_iter().enumerate() {
-                    let idx = ch_idx * MAX_BLOCK_SIZE + dry_idx;
-                    if idx < self.dry_buf.len() {
-                        self.dry_buf[idx] = *sample;
-                    }
+                    self.dry_delay[ch_idx * DRY_DELAY_SIZE + pos] = *sample;
                 }
                 dry_idx += 1;
             }
@@ -322,15 +333,16 @@ impl Pipeline {
             }
 
             let params = BinParams {
-                threshold_db: bp_threshold,
-                ratio:        bp_ratio,
-                attack_ms:    bp_attack,
-                release_ms:   bp_release,
-                knee_db:      bp_knee,
-                makeup_db:    bp_makeup,
-                mix:          bp_mix,
+                threshold_db:       bp_threshold,
+                ratio:              bp_ratio,
+                attack_ms:          bp_attack,
+                release_ms:         bp_release,
+                knee_db:            bp_knee,
+                makeup_db:          bp_makeup,
+                mix:                bp_mix,
                 sensitivity,
                 auto_makeup,
+                smoothing_semitones: suppression_width,
             };
 
             // Select engine: Independent mode uses engine_r for channel 1
@@ -366,19 +378,23 @@ impl Pipeline {
             }
         }
 
-        // Delta monitor: output dry - wet so the user hears what is being removed
+        // Delta monitor: output dry(delayed by FFT_SIZE) − wet = the removed signal.
+        // Reading FFT_SIZE positions behind the write head aligns the captured dry with
+        // the STFT-latency-shifted wet output, giving a clean difference signal.
         if delta_monitor {
+            let block_samples = buffer.samples();
             let mut dry_idx = 0usize;
             for sample_block in buffer.iter_samples() {
+                let read_pos =
+                    (self.dry_delay_write + dry_idx + DRY_DELAY_SIZE - FFT_SIZE) % DRY_DELAY_SIZE;
                 for (ch_idx, sample) in sample_block.into_iter().enumerate() {
-                    let dry_val = self.dry_buf
-                        .get(ch_idx * MAX_BLOCK_SIZE + dry_idx)
-                        .copied()
-                        .unwrap_or(0.0);
+                    let dry_val = self.dry_delay[ch_idx * DRY_DELAY_SIZE + read_pos];
                     *sample = dry_val - *sample;
                 }
                 dry_idx += 1;
             }
+            // Advance write head now that both write (above) and read are done
+            self.dry_delay_write = (self.dry_delay_write + block_samples) % DRY_DELAY_SIZE;
         }
 
         // Push latest spectra to GUI triple-buffers (allocation-free: mutate in-place then publish)
