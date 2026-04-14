@@ -39,11 +39,28 @@ pub fn create_editor(
                     let db_min     = *params.graph_db_min.lock();
                     let db_max     = *params.graph_db_max.lock();
                     let falloff    = *params.peak_falloff_ms.lock();
-                    let atk_ms     = params.attack_ms.value();
-                    let rel_ms     = params.release_ms.value();
-                    let freq_sc    = params.freq_scale.value();
-                    let th_slope   = params.threshold_slope.value();
-                    let th_offset  = params.threshold_offset.value();
+                    let atk_ms  = params.attack_ms.value();
+                    let rel_ms  = params.release_ms.value();
+
+                    // Per-curve tilt and offset arrays (indexed by curve_idx).
+                    let tilts = [
+                        params.threshold_tilt.value(),
+                        params.ratio_tilt.value(),
+                        params.attack_tilt.value(),
+                        params.release_tilt.value(),
+                        params.knee_tilt.value(),
+                        params.makeup_tilt.value(),
+                        params.mix_tilt.value(),
+                    ];
+                    let offsets = [
+                        params.threshold_offset.value(),
+                        params.ratio_offset.value(),
+                        params.attack_offset.value(),
+                        params.release_offset.value(),
+                        params.knee_offset.value(),
+                        params.makeup_offset.value(),
+                        params.mix_offset.value(),
+                    ];
                     let active_tab = *params.active_tab.lock() as usize;
 
                     // ── Top bar: curve selectors + tab buttons + range controls ──────
@@ -218,17 +235,17 @@ pub fn create_editor(
                         crv::paint_response_curve(
                             ui.painter(), curve_rect, &all_gains[i], i,
                             th::curve_color_dim(i), 1.0,
-                            db_min, db_max, atk_ms, rel_ms, freq_sc, sr,
+                            db_min, db_max, atk_ms, rel_ms, sr,
                             crate::dsp::pipeline::FFT_SIZE,
-                            th_slope, th_offset,
+                            tilts[i], offsets[i],
                         );
                     }
                     crv::paint_response_curve(
                         ui.painter(), curve_rect, &all_gains[active_idx], active_idx,
                         th::curve_color_lit(active_idx), 2.0,
-                        db_min, db_max, atk_ms, rel_ms, freq_sc, sr,
+                        db_min, db_max, atk_ms, rel_ms, sr,
                         crate::dsp::pipeline::FFT_SIZE,
-                        th_slope, th_offset,
+                        tilts[active_idx], offsets[active_idx],
                     );
 
                     // 4. Interactive nodes — Dynamics tab only
@@ -238,7 +255,7 @@ pub fn create_editor(
                             ui, curve_rect, &mut nodes, &all_gains[active_idx],
                             active_idx, db_min, db_max, atk_ms, rel_ms, sr,
                             crate::dsp::pipeline::FFT_SIZE,
-                            th_slope, th_offset,
+                            tilts[active_idx], offsets[active_idx],
                         ) {
                             params.curve_nodes.lock()[active_idx] = nodes;
                             if num_bins > 0 {
@@ -371,7 +388,6 @@ pub fn create_editor(
                                     ui.horizontal(|ui| {
                                         knob!(ui, &params.attack_ms,         "Atk");
                                         knob!(ui, &params.release_ms,        "Rel");
-                                        knob!(ui, &params.freq_scale,        "env f.scaling");
                                         knob!(ui, &params.sensitivity,       "Sens");
                                         knob!(ui, &params.suppression_width, "Width");
                                     });
@@ -385,9 +401,27 @@ pub fn create_editor(
                                     th::LABEL_DIM,
                                 );
 
+                                // Tilt and Offset — active-curve–coloured, affect whichever
+                                // curve is currently selected.
                                 ui.add_space(8.0);
-                                knob!(ui, &params.threshold_offset, "Th Off");
-                                knob!(ui, &params.threshold_slope,  "Tilt");
+                                let crv_col = th::curve_color_lit(active_idx);
+                                macro_rules! cknob {
+                                    ($param:expr, $label:expr) => {
+                                        ui.vertical(|ui| {
+                                            ui.add(ParamSlider::for_param($param, setter).with_width(36.0));
+                                            ui.label(egui::RichText::new($label).color(crv_col).size(9.0));
+                                        });
+                                    };
+                                }
+                                match active_idx {
+                                    0 => { cknob!(&params.threshold_offset, "Offset"); cknob!(&params.threshold_tilt, "Tilt"); }
+                                    1 => { cknob!(&params.ratio_offset,     "Offset"); cknob!(&params.ratio_tilt,     "Tilt"); }
+                                    2 => { cknob!(&params.attack_offset,    "Offset"); cknob!(&params.attack_tilt,    "Tilt"); }
+                                    3 => { cknob!(&params.release_offset,   "Offset"); cknob!(&params.release_tilt,   "Tilt"); }
+                                    4 => { cknob!(&params.knee_offset,      "Offset"); cknob!(&params.knee_tilt,      "Tilt"); }
+                                    5 => { cknob!(&params.makeup_offset,    "Offset"); cknob!(&params.makeup_tilt,    "Tilt"); }
+                                    _ => { cknob!(&params.mix_offset,       "Offset"); cknob!(&params.mix_tilt,       "Tilt"); }
+                                }
                             }
                             1 => {
                                 // Effects: mode buttons + contextual knob

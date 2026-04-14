@@ -222,24 +222,14 @@ fn log_to_y(v: f32, y_min: f32, y_max: f32, rect: Rect) -> f32 {
 
 // ─── Physical value mapping ───────────────────────────────────────────────────
 
-/// Compute the visual dBFS position of the threshold curve at one bin,
-/// mirroring the pipeline formula exactly so the display matches what the
-/// compressor actually does.
-///
-/// `slope` — dB/octave, pivoting at 1 kHz (positive = treble threshold higher)
-/// `offset` — uniform dB shift of the whole curve
+/// Apply per-curve tilt (dB/oct, pivot 1 kHz) and uniform offset (dB) to a raw gain value.
+/// Mirrors the pipeline formula: gain *= 10^(tilt * log2(f/1000) / 20) * 10^(offset / 20).
 #[inline]
-pub fn threshold_display_db(
-    gain: f32,
-    f_hz: f32,
-    slope: f32,
-    offset: f32,
-    db_min: f32,
-    db_max: f32,
-) -> f32 {
-    let t_db = if gain > 1e-10 { 20.0 * gain.log10() } else { -120.0 };
-    let slope_offset = slope * (f_hz / 1000.0_f32).log2();
-    (-20.0 + t_db * (60.0 / 18.0) + slope_offset + offset).clamp(db_min, db_max)
+pub fn apply_curve_adjustments(gain: f32, f_hz: f32, tilt: f32, offset: f32) -> f32 {
+    if tilt.abs() < 1e-6 && offset.abs() < 1e-6 { return gain; }
+    let tilt_factor   = 10.0f32.powf(tilt * (f_hz / 1000.0_f32).log2() / 20.0);
+    let offset_factor = 10.0f32.powf(offset / 20.0);
+    gain * tilt_factor * offset_factor
 }
 
 /// Convert a curve's linear gain to its physical display value (no freq scaling).
@@ -268,21 +258,6 @@ pub fn gain_to_display(
     }
 }
 
-/// Convert a curve's linear gain to its physical display value WITH frequency scaling.
-/// Used for the grey true-time line on attack/release curves.
-pub fn gain_to_true_time(
-    _curve_idx: usize,
-    gain: f32,
-    global_ms: f32,
-    freq_scale: f32,
-    bin_k: usize,
-    sample_rate: f32,
-    fft_size: usize,
-) -> f32 {
-    let f     = (bin_k as f32 * sample_rate / fft_size as f32).max(20.0);
-    let scale = (1000.0_f32 / f).powf(freq_scale * 0.5);
-    (global_ms * scale * gain.max(0.01)).clamp(1.0, 1024.0)
-}
 
 /// Map a physical value to pixel y for a given curve type.
 pub fn physical_to_y(v: f32, curve_idx: usize, db_min: f32, db_max: f32, rect: Rect) -> f32 {
@@ -447,42 +422,22 @@ pub fn paint_response_curve(
     db_max: f32,
     global_attack_ms: f32,
     global_release_ms: f32,
-    freq_scale: f32,
     sample_rate: f32,
     fft_size: usize,
-    th_slope: f32,
-    th_offset: f32,
+    tilt: f32,
+    offset: f32,
 ) {
     if gains.len() < 2 { return; }
     let n = gains.len();
     let max_hz = (sample_rate / 2.0).max(20_001.0);
 
-    // True-time line for attack/release — dashed, dim shade of the parent curve colour,
-    // so the user can see at a glance that it belongs to the same parameter.
-    // Drawn first so the coloured curve renders on top.
-    if curve_idx == 2 || curve_idx == 3 {
-        let global_ms   = if curve_idx == 2 { global_attack_ms } else { global_release_ms };
-        let dim_color   = th::curve_color_dim(curve_idx);
-        let grey_pts: Vec<Pos2> = (0..n).map(|k| {
-            let f_hz = (k as f32 * sample_rate / fft_size as f32).max(20.0);
-            let x    = freq_to_x_max(f_hz, max_hz, rect);
-            let v    = gain_to_true_time(curve_idx, gains[k], global_ms, freq_scale, k, sample_rate, fft_size);
-            let y    = physical_to_y(v, curve_idx, db_min, db_max, rect);
-            Pos2::new(x, y)
-        }).collect();
-        paint_dashed_line(painter, &grey_pts, Stroke::new(th::STROKE_CURVE, dim_color), 4.0, 2.0);
-    }
-
-    // Coloured response line — dashed for attack/release, solid for all other curves.
-    // Threshold (curve 0) incorporates tilt and offset so the display matches the compressor.
+    // Coloured response line — dashed for attack/release, solid for all others.
+    // Tilt and offset are applied to the raw gain before display mapping.
     let pts: Vec<Pos2> = (0..n).map(|k| {
         let f_hz = (k as f32 * sample_rate / fft_size as f32).max(20.0);
         let x    = freq_to_x_max(f_hz, max_hz, rect);
-        let v = if curve_idx == 0 {
-            threshold_display_db(gains[k], f_hz, th_slope, th_offset, db_min, db_max)
-        } else {
-            gain_to_display(curve_idx, gains[k], global_attack_ms, global_release_ms, db_min, db_max)
-        };
+        let adj  = apply_curve_adjustments(gains[k], f_hz, tilt, offset);
+        let v    = gain_to_display(curve_idx, adj, global_attack_ms, global_release_ms, db_min, db_max);
         let y    = physical_to_y(v, curve_idx, db_min, db_max, rect);
         Pos2::new(x, y)
     }).collect();
@@ -512,8 +467,8 @@ pub fn curve_widget(
     global_release_ms: f32,
     sample_rate: f32,
     fft_size: usize,
-    th_slope: f32,
-    th_offset: f32,
+    tilt: f32,
+    offset: f32,
 ) -> bool {
     use nih_plug_egui::egui::Sense;
 
@@ -536,11 +491,8 @@ pub fn curve_widget(
         let freq_hz = 20.0 * 1000.0_f32.powf(nodes[i].x);
         let bin_k = ((freq_hz / sample_rate) * fft_size as f32).round() as usize;
         let bin_k = bin_k.clamp(0, gains.len().saturating_sub(1));
-        let physical = if curve_idx == 0 {
-            threshold_display_db(gains[bin_k], freq_hz, th_slope, th_offset, db_min, db_max)
-        } else {
-            gain_to_display(curve_idx, gains[bin_k], global_attack_ms, global_release_ms, db_min, db_max)
-        };
+        let adj      = apply_curve_adjustments(gains[bin_k], freq_hz, tilt, offset);
+        let physical = gain_to_display(curve_idx, adj, global_attack_ms, global_release_ms, db_min, db_max);
         let sy = physical_to_y(physical, curve_idx, db_min, db_max, rect);
 
         // Visual position scaled to the current SR's Nyquist range.

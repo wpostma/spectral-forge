@@ -142,13 +142,30 @@ impl Pipeline {
         let block_size = buffer.samples() as u32;
         let attack_ms_base    = params.attack_ms.smoothed.next_step(block_size);
         let release_ms_base   = params.release_ms.smoothed.next_step(block_size);
-        let freq_scale        = params.freq_scale.smoothed.next_step(block_size);
         let input_gain_db     = params.input_gain.smoothed.next_step(block_size);
         let output_gain_db    = params.output_gain.smoothed.next_step(block_size);
         let global_mix        = params.mix.smoothed.next_step(block_size);
-        let suppression_width    = params.suppression_width.smoothed.next_step(block_size);
-        let threshold_slope_db   = params.threshold_slope.smoothed.next_step(block_size);
-        let threshold_offset_db  = params.threshold_offset.smoothed.next_step(block_size);
+        let suppression_width = params.suppression_width.smoothed.next_step(block_size);
+
+        // Per-curve tilt (dB/oct) and offset (dB), read once per block.
+        let tilts = [
+            params.threshold_tilt.smoothed.next_step(block_size),
+            params.ratio_tilt.smoothed.next_step(block_size),
+            params.attack_tilt.smoothed.next_step(block_size),
+            params.release_tilt.smoothed.next_step(block_size),
+            params.knee_tilt.smoothed.next_step(block_size),
+            params.makeup_tilt.smoothed.next_step(block_size),
+            params.mix_tilt.smoothed.next_step(block_size),
+        ];
+        let offsets = [
+            params.threshold_offset.smoothed.next_step(block_size),
+            params.ratio_offset.smoothed.next_step(block_size),
+            params.attack_offset.smoothed.next_step(block_size),
+            params.release_offset.smoothed.next_step(block_size),
+            params.knee_offset.smoothed.next_step(block_size),
+            params.makeup_offset.smoothed.next_step(block_size),
+            params.mix_offset.smoothed.next_step(block_size),
+        ];
 
         let effect_mode          = params.effect_mode.value();
         let phase_rand_amount    = params.phase_rand_amount.smoothed.next_step(block_size);
@@ -215,24 +232,30 @@ impl Pipeline {
         // Map curve cache values to physical units, bin by bin.
         // Rust 2021 split field borrows: curve_cache (read) and bp_* (write) are disjoint fields.
         for k in 0..num_bins {
+            let f_k_hz = (k as f32 * sample_rate / FFT_SIZE as f32).max(20.0);
+
+            // Per-curve tilt+offset: multiply each curve's raw gain by frequency-dependent
+            // and uniform factors.  gain *= 10^(tilt * log2(f/1000) / 20) * 10^(offset / 20).
+            let adj = |ci: usize, raw: f32| -> f32 {
+                let tilt_db   = tilts[ci];
+                let offset_db = offsets[ci];
+                if tilt_db.abs() < 1e-6 && offset_db.abs() < 1e-6 { return raw; }
+                let tilt_factor   = 10.0f32.powf(tilt_db * (f_k_hz / 1000.0).log2() / 20.0);
+                let offset_factor = 10.0f32.powf(offset_db / 20.0);
+                raw * tilt_factor * offset_factor
+            };
+
             // Threshold: curve gain 1.0 (neutral node) → -20 dBFS.
             // Log-based mapping amplifies the ±18 dB node range to ±60 dBFS:
             //   y = -1 → gain ≈ 0.126 (−18 dB) → threshold = −80 dBFS
             //   y =  0 → gain = 1.0  (  0 dB) → threshold = −20 dBFS
             //   y = +1 → gain ≈ 7.94 (+18 dB) → threshold →  0 dBFS (clamped)
-            // threshold_slope_db adds a linear tilt (dB/octave, pivot 1 kHz).
-            let t = self.curve_cache[0].get(k).copied().unwrap_or(1.0);
+            let t = adj(0, self.curve_cache[0].get(k).copied().unwrap_or(1.0));
             let t_db = if t > 1e-10 { 20.0 * t.log10() } else { -120.0 };
-            let f_k_hz = (k as f32 * sample_rate / FFT_SIZE as f32).max(20.0);
-            let slope_offset = threshold_slope_db * (f_k_hz / 1000.0_f32).log2();
-            self.bp_threshold[k] = (-20.0 + t_db * (60.0 / 18.0) + slope_offset + threshold_offset_db).clamp(-80.0, 0.0);
+            self.bp_threshold[k] = (-20.0 + t_db * (60.0 / 18.0)).clamp(-80.0, 0.0);
 
-            // Ratio curve: different semantics per mode.
-            // Compressor: gain 1.0 → 1:1 (no compression); must stay ≥ 1.
-            // Contrast:   ratio = base_ratio * curve, where base_ratio comes from
-            //             spectral_contrast_db (0 dB → ratio 1, +6 dB → ratio 2, -6 → 0).
-            //             Allows 0..20 (0 = full flatten, >1 = expand deviations).
-            let r = self.curve_cache[1].get(k).copied().unwrap_or(1.0);
+            // Ratio: gain 1.0 → 1:1 (no compression).
+            let r = adj(1, self.curve_cache[1].get(k).copied().unwrap_or(1.0));
             if effect_mode == crate::params::EffectMode::SpectralContrast {
                 let base = (1.0 + spectral_contrast_db / 6.0).max(0.0);
                 self.bp_ratio[k] = (r * base).clamp(0.0, 20.0);
@@ -240,24 +263,22 @@ impl Pipeline {
                 self.bp_ratio[k] = r.clamp(1.0, 20.0);
             }
 
-            // Frequency-dependent timing: lower frequencies get longer times
-            let f_bin = (k as f32 * sample_rate / crate::dsp::pipeline::FFT_SIZE as f32).max(20.0);
-            let scale = (1000.0_f32 / f_bin).powf(freq_scale * 0.5); // freq_scale ∈ [0,1]
-            let atk_factor = self.curve_cache[2].get(k).copied().unwrap_or(1.0).max(0.01);
-            let rel_factor = self.curve_cache[3].get(k).copied().unwrap_or(1.0).max(0.01);
-            self.bp_attack[k]  = (attack_ms_base  * scale * atk_factor).clamp(0.1, 500.0);
-            self.bp_release[k] = (release_ms_base * scale * rel_factor).clamp(1.0, 2000.0);
+            // Attack / release: tilt replaces the old freq_scale parameter.
+            let atk_factor = adj(2, self.curve_cache[2].get(k).copied().unwrap_or(1.0)).max(0.01);
+            let rel_factor = adj(3, self.curve_cache[3].get(k).copied().unwrap_or(1.0)).max(0.01);
+            self.bp_attack[k]  = (attack_ms_base  * atk_factor).clamp(0.1, 500.0);
+            self.bp_release[k] = (release_ms_base * rel_factor).clamp(1.0, 2000.0);
 
-            // Knee: curve gain 1.0 → 6 dB knee; range 0…24 dB
-            let kn = self.curve_cache[4].get(k).copied().unwrap_or(1.0);
+            // Knee: curve gain 1.0 → 6 dB knee; range 0…48 dB
+            let kn = adj(4, self.curve_cache[4].get(k).copied().unwrap_or(1.0));
             self.bp_knee[k] = (kn * 6.0).clamp(0.0, 48.0);
 
             // Makeup: curve gain as dB (1.0 → 0 dB, >1 → positive makeup)
-            let mk = self.curve_cache[5].get(k).copied().unwrap_or(1.0);
+            let mk = adj(5, self.curve_cache[5].get(k).copied().unwrap_or(1.0));
             self.bp_makeup[k] = if mk > 1e-6 { 20.0 * mk.log10() } else { -96.0 };
 
             // Mix: curve gain 1.0 → full wet; scaled so 1.0 is 100%
-            let mx = self.curve_cache[6].get(k).copied().unwrap_or(1.0);
+            let mx = adj(6, self.curve_cache[6].get(k).copied().unwrap_or(1.0));
             self.bp_mix[k] = (mx * global_mix).clamp(0.0, 1.0);
         }
 

@@ -70,8 +70,37 @@ pub struct SpectralForgeParams {
     #[id = "release_ms"]
     pub release_ms: FloatParam,
 
-    #[id = "freq_scale"]
-    pub freq_scale: FloatParam,
+    // Per-curve tilt (dB/oct, pivot 1 kHz) and offset (dB).
+    // Applied as gain multipliers: gain *= 10^(tilt * log2(f/1000) / 20) * 10^(offset / 20).
+    // Named for host automation readability; displayed in the UI via the active-curve controls.
+    #[id = "threshold_tilt"]
+    pub threshold_tilt: FloatParam,
+    #[id = "threshold_offset"]
+    pub threshold_offset: FloatParam,
+    #[id = "ratio_tilt"]
+    pub ratio_tilt: FloatParam,
+    #[id = "ratio_offset"]
+    pub ratio_offset: FloatParam,
+    #[id = "attack_tilt"]
+    pub attack_tilt: FloatParam,
+    #[id = "attack_offset"]
+    pub attack_offset: FloatParam,
+    #[id = "release_tilt"]
+    pub release_tilt: FloatParam,
+    #[id = "release_offset"]
+    pub release_offset: FloatParam,
+    #[id = "knee_tilt"]
+    pub knee_tilt: FloatParam,
+    #[id = "knee_offset"]
+    pub knee_offset: FloatParam,
+    #[id = "makeup_tilt"]
+    pub makeup_tilt: FloatParam,
+    #[id = "makeup_offset"]
+    pub makeup_offset: FloatParam,
+    #[id = "mix_tilt"]
+    pub mix_tilt: FloatParam,
+    #[id = "mix_offset"]
+    pub mix_offset: FloatParam,
 
     #[id = "sc_gain"]
     pub sc_gain: FloatParam,
@@ -90,17 +119,6 @@ pub struct SpectralForgeParams {
 
     #[id = "threshold_mode"]
     pub threshold_mode: EnumParam<ThresholdMode>,
-
-    /// Global threshold tilt in dB per octave, pivoting at 1 kHz.
-    /// Positive: threshold rises toward high frequencies (spares bright content).
-    /// Negative: threshold falls toward high frequencies (more aggressive on treble).
-    #[id = "threshold_slope"]
-    pub threshold_slope: FloatParam,
-
-    /// Master threshold offset in dB — shifts the entire threshold curve up or down
-    /// without changing its shape. Positive = higher threshold (less compression).
-    #[id = "threshold_offset"]
-    pub threshold_offset: FloatParam,
 
     #[id = "sensitivity"]
     pub sensitivity: FloatParam,
@@ -124,6 +142,21 @@ pub struct SpectralForgeParams {
 
     #[id = "spectral_contrast_db"]
     pub spectral_contrast_db: FloatParam,
+}
+
+impl SpectralForgeParams {
+    fn make_tilt(name: &str) -> FloatParam {
+        FloatParam::new(name, 0.0, FloatRange::Linear { min: -6.0, max: 6.0 })
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_step_size(0.01)
+            .with_unit(" dB/oct")
+    }
+    fn make_offset(name: &str) -> FloatParam {
+        FloatParam::new(name, 0.0, FloatRange::Linear { min: -18.0, max: 18.0 })
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_step_size(0.01)
+            .with_unit(" dB")
+    }
 }
 
 impl Default for SpectralForgeParams {
@@ -173,11 +206,20 @@ impl Default for SpectralForgeParams {
              .with_step_size(0.01)
              .with_unit(" ms"),
 
-            freq_scale: FloatParam::new(
-                "Freq Scale", 0.5,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            ).with_smoother(SmoothingStyle::Linear(50.0))
-             .with_step_size(0.01),
+            threshold_tilt:   Self::make_tilt("Threshold Tilt"),
+            threshold_offset: Self::make_offset("Threshold Offset"),
+            ratio_tilt:       Self::make_tilt("Ratio Tilt"),
+            ratio_offset:     Self::make_offset("Ratio Offset"),
+            attack_tilt:      Self::make_tilt("Attack Tilt"),
+            attack_offset:    Self::make_offset("Attack Offset"),
+            release_tilt:     Self::make_tilt("Release Tilt"),
+            release_offset:   Self::make_offset("Release Offset"),
+            knee_tilt:        Self::make_tilt("Knee Tilt"),
+            knee_offset:      Self::make_offset("Knee Offset"),
+            makeup_tilt:      Self::make_tilt("Makeup Tilt"),
+            makeup_offset:    Self::make_offset("Makeup Offset"),
+            mix_tilt:         Self::make_tilt("Mix Tilt"),
+            mix_offset:       Self::make_offset("Mix Offset"),
 
             sc_gain: FloatParam::new(
                 "SC Gain", 0.0,
@@ -208,20 +250,6 @@ impl Default for SpectralForgeParams {
 
             stereo_link: EnumParam::new("Stereo Link", StereoLink::Linked),
             threshold_mode: EnumParam::new("Threshold Mode", ThresholdMode::Absolute),
-
-            threshold_slope: FloatParam::new(
-                "Threshold Slope", 0.0,
-                FloatRange::Linear { min: -6.0, max: 6.0 },
-            ).with_smoother(SmoothingStyle::Linear(50.0))
-             .with_step_size(0.01)
-             .with_unit(" dB/oct"),
-
-            threshold_offset: FloatParam::new(
-                "Threshold Offset", 0.0,
-                FloatRange::Linear { min: -40.0, max: 40.0 },
-            ).with_smoother(SmoothingStyle::Linear(50.0))
-             .with_step_size(0.01)
-             .with_unit(" dB"),
 
             sensitivity: FloatParam::new(
                 "Sensitivity", 0.0,
