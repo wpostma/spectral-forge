@@ -425,7 +425,7 @@ pub fn create_editor(
                                         egui::RichText::new(label).color(text_c).size(10.0)
                                     )
                                     .fill(fill)
-                                    .stroke(egui::Stroke::new(1.0, th::BORDER))
+                                    .stroke(egui::Stroke::new(th::STROKE_BORDER, th::BORDER))
                                     .min_size(egui::vec2(64.0, 18.0))
                                 ).clicked() {
                                     setter.begin_set_parameter(&params.effect_mode);
