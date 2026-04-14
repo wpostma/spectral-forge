@@ -166,7 +166,7 @@ pub fn create_editor(
                         _ => {
                             let g: Vec<Vec<f32>> = (0..NUM_CURVE_SETS)
                                 .map(|i| crv::compute_curve_response(
-                                    &nodes_snapshot[i], 512, sr,
+                                    &nodes_snapshot[i], crate::dsp::pipeline::NUM_BINS, sr,
                                     crate::dsp::pipeline::FFT_SIZE,
                                 ))
                                 .collect();
