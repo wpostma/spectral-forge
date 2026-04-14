@@ -42,6 +42,8 @@ pub fn create_editor(
                     let atk_ms     = params.attack_ms.value();
                     let rel_ms     = params.release_ms.value();
                     let freq_sc    = params.freq_scale.value();
+                    let th_slope   = params.threshold_slope.value();
+                    let th_offset  = params.threshold_offset.value();
                     let active_tab = *params.active_tab.lock() as usize;
 
                     // ── Top bar: curve selectors + tab buttons + range controls ──────
@@ -218,6 +220,7 @@ pub fn create_editor(
                             th::curve_color_dim(i), 1.0,
                             db_min, db_max, atk_ms, rel_ms, freq_sc, sr,
                             crate::dsp::pipeline::FFT_SIZE,
+                            th_slope, th_offset,
                         );
                     }
                     crv::paint_response_curve(
@@ -225,6 +228,7 @@ pub fn create_editor(
                         th::curve_color_lit(active_idx), 2.0,
                         db_min, db_max, atk_ms, rel_ms, freq_sc, sr,
                         crate::dsp::pipeline::FFT_SIZE,
+                        th_slope, th_offset,
                     );
 
                     // 4. Interactive nodes — Dynamics tab only
@@ -234,6 +238,7 @@ pub fn create_editor(
                             ui, curve_rect, &mut nodes, &all_gains[active_idx],
                             active_idx, db_min, db_max, atk_ms, rel_ms, sr,
                             crate::dsp::pipeline::FFT_SIZE,
+                            th_slope, th_offset,
                         ) {
                             params.curve_nodes.lock()[active_idx] = nodes;
                             if num_bins > 0 {
