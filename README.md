@@ -4,6 +4,8 @@ A spectral compressor and effects processor for Linux, implemented as a CLAP plu
 
 Patent-safe design — does not use the Hilbert/convolution approach from oeksound's patents.
 
+Very early test version. The dynamics section is more or less functional, the multi fx part is under heavy testing. Much of the developement happens in Main, so expect things to be unexpectedly broken or unfinished at the current stage.
+
 ---
 
 ## Building and installing
