@@ -8,7 +8,7 @@ Very early test version. The dynamics section is more or less functional, the mu
 
 ---
 
-<img width="1249" height="1293" alt="Screenshot_20260415_001924" src="https://github.com/user-attachments/assets/e00dd154-fbbf-43ae-aaf2-b458314d3a54" />
+<img width="935" height="658" alt="Screenshot_20260415_014304" src="https://github.com/user-attachments/assets/5b3b05d2-d4bf-4d5f-aafe-247824d3fca8" />
 
 ## Building and installing
 
