@@ -80,6 +80,39 @@ pub const TRUE_TIME_LINE:Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
 pub const BORDER:        Color32 = Color32::from_rgb(0x00, 0x88, 0x80);
 pub const LABEL_DIM:     Color32 = Color32::from_rgb(0x44, 0x88, 0x80);
 
+// ─── Freeze curve colours (4 equidistant, 30°, 120°, 210°, 300°) ─────────────
+
+fn build_freeze_colors() -> ([Color32; 4], [Color32; 4]) {
+    let mut lit = [Color32::WHITE; 4];
+    let mut dim = [Color32::WHITE; 4];
+    for i in 0..4 {
+        let h = 30.0 + (i as f32) * 90.0;
+        lit[i] = lch_to_srgb(75.0, 50.0, h);
+        dim[i] = lch_to_srgb(30.0, 50.0, h);
+    }
+    (lit, dim)
+}
+
+static FREEZE_COLORS: std::sync::OnceLock<([Color32; 4], [Color32; 4])> =
+    std::sync::OnceLock::new();
+fn freeze_colors() -> &'static ([Color32; 4], [Color32; 4]) {
+    FREEZE_COLORS.get_or_init(build_freeze_colors)
+}
+
+/// Lit (L=75) colour for freeze curve i.
+pub fn freeze_color_lit(i: usize) -> Color32 { freeze_colors().0[i.min(3)] }
+/// Dim (L=30) colour for freeze curve i.
+pub fn freeze_color_dim(i: usize) -> Color32 { freeze_colors().1[i.min(3)] }
+
+// ─── Phase curve colour (H=270°, purple) ──────────────────────────────────────
+
+static PHASE_COLOR: std::sync::OnceLock<(Color32, Color32)> = std::sync::OnceLock::new();
+fn phase_color_inner() -> &'static (Color32, Color32) {
+    PHASE_COLOR.get_or_init(|| (lch_to_srgb(75.0, 50.0, 270.0), lch_to_srgb(30.0, 50.0, 270.0)))
+}
+pub fn phase_color_lit() -> Color32 { phase_color_inner().0 }
+pub fn phase_color_dim() -> Color32 { phase_color_inner().1 }
+
 // ─── Stroke widths & geometry ─────────────────────────────────────────────────
 
 pub const STROKE_THIN:   f32 = 1.0;

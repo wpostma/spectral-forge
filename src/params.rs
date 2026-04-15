@@ -47,6 +47,18 @@ pub struct SpectralForgeParams {
     #[persist = "active_tab"]
     pub active_tab: Arc<Mutex<u8>>,   // 0 = Dynamics, 1 = Effects, 2 = Harmonic
 
+    /// Nodes for the per-bin phase-randomisation amount curve (Effects tab, Phase mode).
+    #[persist = "phase_curve_nodes"]
+    pub phase_curve_nodes: Arc<Mutex<[crate::editor::curve::CurveNode; NUM_NODES]>>,
+
+    /// 4 nodes sets for Freeze per-bin curves: Length, Threshold, Portamento, Resistance.
+    #[persist = "freeze_curve_nodes"]
+    pub freeze_curve_nodes: Arc<Mutex<[[crate::editor::curve::CurveNode; NUM_NODES]; 4]>>,
+
+    /// Which of the 4 freeze curves is selected for editing (0–3).
+    #[persist = "freeze_active_curve"]
+    pub freeze_active_curve: Arc<Mutex<u8>>,
+
     // GUI display state — not audio parameters, not sent to audio thread
     #[persist = "graph_db_min"]
     pub graph_db_min: Arc<Mutex<f32>>,      // dBFS floor of spectrum display, default -100
@@ -168,6 +180,13 @@ impl Default for SpectralForgeParams {
             )),
             active_curve: Arc::new(Mutex::new(0)),
             active_tab: Arc::new(Mutex::new(0)),
+            phase_curve_nodes: Arc::new(Mutex::new(
+                crate::editor::curve::default_nodes()
+            )),
+            freeze_curve_nodes: Arc::new(Mutex::new(
+                std::array::from_fn(|_| crate::editor::curve::default_nodes())
+            )),
+            freeze_active_curve: Arc::new(Mutex::new(0)),
             graph_db_min:    Arc::new(Mutex::new(-100.0)),
             graph_db_max:    Arc::new(Mutex::new(0.0)),
             peak_falloff_ms: Arc::new(Mutex::new(300.0)),

@@ -198,12 +198,35 @@ pub fn screen_y_to_physical(y: f32, curve_idx: usize, db_min: f32, db_max: f32, 
         4 => 1.5 * (48.0_f32 / 1.5).powf(t),
         5 => -36.0 + t * 72.0,
         6 => t * 100.0,
+        7 => t * 200.0,
+        8 => 10.0 * 200.0_f32.powf(t),
+        9 => -80.0 + t * 80.0,
+        10 => 1000.0_f32.powf(t),
+        11 => t * 5.0,
         _ => 0.0,
     }
 }
 
-/// Unit label for each curve's y-axis (for the cursor tooltip).
-pub const CURVE_Y_UNIT: [&str; 7] = ["dBFS", "x", "ms", "ms", "dB", "dB", "%"];
+/// Labels for the 4 Freeze per-bin curve buttons.
+pub const FREEZE_CURVE_LABELS: [&str; 4] = ["LENGTH", "THRESHOLD", "PORTAMENTO", "RESISTANCE"];
+
+/// Unit label for a curve's y-axis (used in cursor tooltip).
+pub fn curve_y_unit(curve_idx: usize) -> &'static str {
+    match curve_idx {
+        0 => "dBFS",
+        1 => "x",
+        2 | 3 => "ms",
+        4 => "dB",
+        5 => "dB",
+        6 => "%",
+        7 => "%",      // Phase Amount
+        8 => "ms",     // Freeze Length
+        9 => "dBFS",   // Freeze Threshold
+        10 => "ms",    // Freeze Portamento
+        11 => "",      // Freeze Resistance (dimensionless)
+        _ => "",
+    }
+}
 
 /// Map a physical value to pixel y using a linear scale.
 #[inline]
@@ -254,6 +277,15 @@ pub fn gain_to_display(
         4 => (gain * 6.0).clamp(1.5, 48.0),
         5 => if gain > 1e-6 { (20.0 * gain.log10()).clamp(-36.0, 36.0) } else { -36.0 },
         6 => (gain * 100.0).clamp(0.0, 100.0),
+        // Effects curves — tilt/offset not used (passed as 0.0/0.0 from UI)
+        7 => gain.clamp(0.0, 2.0) * 100.0,                  // Phase Amount: 0-200%
+        8 => (gain * 500.0).clamp(0.0, 2000.0),             // Freeze Length: 0-2000ms
+        9 => {                                               // Freeze Threshold: dBFS
+            let t_db = if gain > 1e-10 { 20.0 * gain.log10() } else { -120.0 };
+            (-20.0 + t_db * (60.0 / 18.0)).clamp(-80.0, 0.0)
+        }
+        10 => (gain * 100.0).clamp(0.0, 1000.0),            // Portamento: 0-1000ms
+        11 => (gain * 1.0).clamp(0.0, 5.0),                 // Resistance: 0-5
         _ => gain,
     }
 }
@@ -268,6 +300,11 @@ pub fn physical_to_y(v: f32, curve_idx: usize, db_min: f32, db_max: f32, rect: R
         4 => log_to_y(v, 1.5, 48.0, rect),
         5 => linear_to_y(v, -36.0, 36.0, rect),
         6 => linear_to_y(v, 0.0, 100.0, rect),
+        7 => linear_to_y(v, 0.0, 200.0, rect),
+        8 => log_to_y(v.max(10.0), 10.0, 2000.0, rect),
+        9 => linear_to_y(v, -80.0, 0.0, rect),
+        10 => log_to_y(v.max(1.0), 1.0, 1000.0, rect),
+        11 => linear_to_y(v, 0.0, 5.0, rect),
         _ => rect.center().y,
     }
 }
@@ -328,6 +365,31 @@ fn curve_grid_lines(curve_idx: usize, db_min: f32, db_max: f32) -> Vec<(f32, Str
             (40.0,  "40%".to_string()),
             (60.0,  "60%".to_string()),
             (80.0,  "80%".to_string()),
+        ],
+        7 => vec![
+            (50.0,  "50%".to_string()),
+            (100.0, "100%".to_string()),
+            (150.0, "150%".to_string()),
+        ],
+        8 => vec![
+            (100.0,  "100ms".to_string()),
+            (500.0,  "500ms".to_string()),
+            (1000.0, "1s".to_string()),
+        ],
+        9 => vec![
+            (-12.0, "-12dB".to_string()),
+            (-40.0, "-40dB".to_string()),
+            (-60.0, "-60dB".to_string()),
+        ],
+        10 => vec![
+            (10.0,  "10ms".to_string()),
+            (100.0, "100ms".to_string()),
+            (500.0, "500ms".to_string()),
+        ],
+        11 => vec![
+            (1.0,  "1.0".to_string()),
+            (2.5,  "2.5".to_string()),
+            (4.0,  "4.0".to_string()),
         ],
         _ => vec![],
     }

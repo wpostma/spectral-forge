@@ -12,6 +12,8 @@ const CURVE_LABELS: [&str; NUM_CURVE_SETS] =
 pub fn create_editor(
     params: Arc<SpectralForgeParams>,
     curve_tx: Vec<Arc<Mutex<TbInput<Vec<f32>>>>>,
+    phase_curve_tx: Arc<Mutex<TbInput<Vec<f32>>>>,
+    freeze_curve_tx: Vec<Arc<Mutex<TbInput<Vec<f32>>>>>,
     sample_rate: Option<Arc<crate::bridge::AtomicF32>>,
     num_bins: usize,
     spectrum_rx: Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
@@ -34,13 +36,21 @@ pub fn create_editor(
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(th::BG))
                 .show(ctx, |ui| {
-                    let active_idx = *params.active_curve.lock() as usize;
-                    let sr         = sample_rate.as_ref().map(|a| a.load()).unwrap_or(44100.0);
-                    let db_min     = *params.graph_db_min.lock();
-                    let db_max     = *params.graph_db_max.lock();
-                    let falloff    = *params.peak_falloff_ms.lock();
-                    let atk_ms  = params.attack_ms.value();
-                    let rel_ms  = params.release_ms.value();
+                    let active_idx   = *params.active_curve.lock() as usize;
+                    let sr           = sample_rate.as_ref().map(|a| a.load()).unwrap_or(44100.0);
+                    let db_min       = *params.graph_db_min.lock();
+                    let db_max       = *params.graph_db_max.lock();
+                    let falloff      = *params.peak_falloff_ms.lock();
+                    let atk_ms       = params.attack_ms.value();
+                    let rel_ms       = params.release_ms.value();
+                    let active_tab   = *params.active_tab.lock() as usize;
+                    let cur_mode     = params.effect_mode.value();
+                    let freeze_active = *params.freeze_active_curve.lock() as usize;
+
+                    let is_freeze_mode = active_tab == 1
+                        && cur_mode == crate::params::EffectMode::Freeze;
+                    let is_phase_mode  = active_tab == 1
+                        && cur_mode == crate::params::EffectMode::PhaseRand;
 
                     // Per-curve tilt and offset arrays (indexed by curve_idx).
                     let tilts = [
@@ -61,25 +71,56 @@ pub fn create_editor(
                         params.makeup_offset.value(),
                         params.mix_offset.value(),
                     ];
-                    let active_tab = *params.active_tab.lock() as usize;
 
                     // ── Top bar: curve selectors + tab buttons + range controls ──────
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
-                        for (i, label) in CURVE_LABELS.iter().enumerate() {
-                            let is_active = active_idx == i;
-                            let (fill, text_color, stroke_color) = if is_active {
-                                (th::curve_color_lit(i), th::curve_color_text_on(i), th::curve_color_lit(i))
-                            } else {
-                                (th::curve_color_dim(i), th::curve_color_lit(i), th::curve_color_dim(i))
-                            };
-                            let btn = egui::Button::new(
-                                egui::RichText::new(*label).color(text_color).size(11.0),
-                            )
-                            .fill(fill)
-                            .stroke(egui::Stroke::new(th::STROKE_BORDER, stroke_color));
-                            if ui.add(btn).clicked() {
-                                *params.active_curve.lock() = i as u8;
+
+                        if is_freeze_mode {
+                            // 4 freeze curve buttons replace the 7 dynamics buttons.
+                            for (i, label) in crv::FREEZE_CURVE_LABELS.iter().enumerate() {
+                                let is_active = freeze_active == i;
+                                let (fill, text_color, stroke_color) = if is_active {
+                                    (th::freeze_color_lit(i),
+                                     th::freeze_color_dim(i),
+                                     th::freeze_color_lit(i))
+                                } else {
+                                    (th::freeze_color_dim(i),
+                                     th::freeze_color_lit(i),
+                                     th::freeze_color_dim(i))
+                                };
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(*label).color(text_color).size(11.0),
+                                )
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(th::STROKE_BORDER, stroke_color));
+                                if ui.add(btn).clicked() {
+                                    *params.freeze_active_curve.lock() = i as u8;
+                                }
+                            }
+                        } else {
+                            // 7 dynamics curve buttons.
+                            // Clicking any of them auto-switches to the Dynamics tab.
+                            for (i, label) in CURVE_LABELS.iter().enumerate() {
+                                let is_active = active_idx == i && active_tab == 0;
+                                let (fill, text_color, stroke_color) = if is_active {
+                                    (th::curve_color_lit(i),
+                                     th::curve_color_text_on(i),
+                                     th::curve_color_lit(i))
+                                } else {
+                                    (th::curve_color_dim(i),
+                                     th::curve_color_lit(i),
+                                     th::curve_color_dim(i))
+                                };
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(*label).color(text_color).size(11.0),
+                                )
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(th::STROKE_BORDER, stroke_color));
+                                if ui.add(btn).clicked() {
+                                    *params.active_curve.lock() = i as u8;
+                                    *params.active_tab.lock()   = 0; // auto-switch to Dynamics
+                                }
                             }
                         }
 
@@ -161,8 +202,7 @@ pub fn create_editor(
                         );
                     }
 
-                    // ── Spectrum / curve area (always shown on all tabs) ──────────
-                    // Two control rows below: reserve ~105 px for them.
+                    // ── Spectrum / curve area ─────────────────────────────────────
                     let strip_height = 105.0;
                     let avail = ui.available_rect_before_wrap();
                     let curve_rect = egui::Rect::from_min_max(
@@ -170,27 +210,6 @@ pub fn create_editor(
                         egui::pos2(avail.max.x, (avail.max.y - strip_height).max(avail.min.y)),
                     );
                     ui.allocate_rect(curve_rect, egui::Sense::hover());
-
-                    // Cache all 7 display-resolution curve responses
-                    let nodes_snapshot = *params.curve_nodes.lock();
-                    let cache_key = ui.id().with("all_display_gains");
-                    let cached: Option<([[crv::CurveNode; 6]; NUM_CURVE_SETS], Vec<Vec<f32>>)> =
-                        ui.data(|d| d.get_temp(cache_key));
-                    let all_gains: Vec<Vec<f32>> = match cached {
-                        Some((cached_nodes, cached_gains)) if cached_nodes == nodes_snapshot => {
-                            cached_gains
-                        }
-                        _ => {
-                            let g: Vec<Vec<f32>> = (0..NUM_CURVE_SETS)
-                                .map(|i| crv::compute_curve_response(
-                                    &nodes_snapshot[i], crate::dsp::pipeline::NUM_BINS, sr,
-                                    crate::dsp::pipeline::FFT_SIZE,
-                                ))
-                                .collect();
-                            ui.data_mut(|d| d.insert_temp(cache_key, (nodes_snapshot, g.clone())));
-                            g
-                        }
-                    };
 
                     // Read spectrum + suppression from bridge
                     let mut raw_magnitudes: Option<Vec<f32>> = None;
@@ -211,10 +230,19 @@ pub fn create_editor(
                     let mut peak_hold: Vec<f32> = ui.data(|d| d.get_temp(peak_key))
                         .unwrap_or_default();
 
-                    // 1. Grid
-                    crv::paint_grid(ui.painter(), curve_rect, active_idx, db_min, db_max, sr);
+                    // Determine which curve_idx drives the grid
+                    let grid_curve_idx = if is_freeze_mode {
+                        8 + freeze_active
+                    } else if is_phase_mode {
+                        7
+                    } else {
+                        active_idx
+                    };
 
-                    // 2. Spectrum + suppression gradient
+                    // 1. Grid
+                    crv::paint_grid(ui.painter(), curve_rect, grid_curve_idx, db_min, db_max, sr);
+
+                    // 2. Spectrum + suppression gradient (always shown)
                     if let Some(ref mags) = raw_magnitudes {
                         let norm = 4.0 / crate::dsp::pipeline::FFT_SIZE as f32;
                         let norm_mags: Vec<f32> = mags.iter().map(|m| m * norm).collect();
@@ -229,41 +257,66 @@ pub fn create_editor(
                         );
                     }
 
-                    // 3. All 7 response curves (always drawn regardless of tab)
-                    for i in 0..NUM_CURVE_SETS {
-                        if i == active_idx { continue; }
-                        crv::paint_response_curve(
-                            ui.painter(), curve_rect, &all_gains[i], i,
-                            th::curve_color_dim(i), 1.0,
-                            db_min, db_max, atk_ms, rel_ms, sr,
+                    // 3 + 4. Response curves + interactive widget
+                    if is_phase_mode {
+                        // Phase mode: single per-bin phase-amount curve.
+                        let phase_nodes = *params.phase_curve_nodes.lock();
+                        let phase_gains = crv::compute_curve_response(
+                            &phase_nodes, crate::dsp::pipeline::NUM_BINS, sr,
                             crate::dsp::pipeline::FFT_SIZE,
-                            tilts[i], offsets[i],
                         );
-                    }
-                    crv::paint_response_curve(
-                        ui.painter(), curve_rect, &all_gains[active_idx], active_idx,
-                        th::curve_color_lit(active_idx), 2.0,
-                        db_min, db_max, atk_ms, rel_ms, sr,
-                        crate::dsp::pipeline::FFT_SIZE,
-                        tilts[active_idx], offsets[active_idx],
-                    );
-
-                    // 4. Interactive nodes — Dynamics tab only
-                    if active_tab == 0 {
-                        let mut nodes = nodes_snapshot[active_idx];
+                        crv::paint_response_curve(
+                            ui.painter(), curve_rect, &phase_gains, 7,
+                            th::phase_color_lit(), 2.0,
+                            db_min, db_max, atk_ms, rel_ms, sr,
+                            crate::dsp::pipeline::FFT_SIZE, 0.0, 0.0,
+                        );
+                        // Interactive widget
+                        let mut nodes = phase_nodes;
                         if crv::curve_widget(
-                            ui, curve_rect, &mut nodes, &all_gains[active_idx],
-                            active_idx, db_min, db_max, atk_ms, rel_ms, sr,
-                            crate::dsp::pipeline::FFT_SIZE,
-                            tilts[active_idx], offsets[active_idx],
+                            ui, curve_rect, &mut nodes, &phase_gains,
+                            7, db_min, db_max, atk_ms, rel_ms, sr,
+                            crate::dsp::pipeline::FFT_SIZE, 0.0, 0.0,
                         ) {
-                            params.curve_nodes.lock()[active_idx] = nodes;
+                            *params.phase_curve_nodes.lock() = nodes;
                             if num_bins > 0 {
                                 let full_gains = crv::compute_curve_response(
-                                    &nodes, num_bins, sr,
-                                    crate::dsp::pipeline::FFT_SIZE,
+                                    &nodes, num_bins, sr, crate::dsp::pipeline::FFT_SIZE,
                                 );
-                                if let Some(tx_arc) = curve_tx.get(active_idx) {
+                                if let Some(mut tx) = phase_curve_tx.try_lock() {
+                                    tx.input_buffer_mut().copy_from_slice(&full_gains);
+                                    tx.publish();
+                                }
+                            }
+                        }
+                    } else if is_freeze_mode {
+                        // Freeze mode: show only the selected freeze curve.
+                        let freeze_nodes_all = *params.freeze_curve_nodes.lock();
+                        let freeze_nodes = freeze_nodes_all[freeze_active];
+                        let freeze_gains = crv::compute_curve_response(
+                            &freeze_nodes, crate::dsp::pipeline::NUM_BINS, sr,
+                            crate::dsp::pipeline::FFT_SIZE,
+                        );
+                        let freeze_curve_idx = 8 + freeze_active;
+                        crv::paint_response_curve(
+                            ui.painter(), curve_rect, &freeze_gains, freeze_curve_idx,
+                            th::freeze_color_lit(freeze_active), 2.0,
+                            db_min, db_max, atk_ms, rel_ms, sr,
+                            crate::dsp::pipeline::FFT_SIZE, 0.0, 0.0,
+                        );
+                        // Interactive widget
+                        let mut nodes_mut = freeze_nodes;
+                        if crv::curve_widget(
+                            ui, curve_rect, &mut nodes_mut, &freeze_gains,
+                            freeze_curve_idx, db_min, db_max, atk_ms, rel_ms, sr,
+                            crate::dsp::pipeline::FFT_SIZE, 0.0, 0.0,
+                        ) {
+                            params.freeze_curve_nodes.lock()[freeze_active] = nodes_mut;
+                            if num_bins > 0 {
+                                let full_gains = crv::compute_curve_response(
+                                    &nodes_mut, num_bins, sr, crate::dsp::pipeline::FFT_SIZE,
+                                );
+                                if let Some(tx_arc) = freeze_curve_tx.get(freeze_active) {
                                     if let Some(mut tx) = tx_arc.try_lock() {
                                         tx.input_buffer_mut().copy_from_slice(&full_gains);
                                         tx.publish();
@@ -271,43 +324,107 @@ pub fn create_editor(
                                 }
                             }
                         }
+                    } else {
+                        // Dynamics / other tab: show all 7 dynamics response curves.
+                        let nodes_snapshot = *params.curve_nodes.lock();
+                        let cache_key = ui.id().with("all_display_gains");
+                        let cached: Option<([[crv::CurveNode; 6]; NUM_CURVE_SETS], Vec<Vec<f32>>)> =
+                            ui.data(|d| d.get_temp(cache_key));
+                        let all_gains: Vec<Vec<f32>> = match cached {
+                            Some((cached_nodes, cached_gains)) if cached_nodes == nodes_snapshot => {
+                                cached_gains
+                            }
+                            _ => {
+                                let g: Vec<Vec<f32>> = (0..NUM_CURVE_SETS)
+                                    .map(|i| crv::compute_curve_response(
+                                        &nodes_snapshot[i], crate::dsp::pipeline::NUM_BINS, sr,
+                                        crate::dsp::pipeline::FFT_SIZE,
+                                    ))
+                                    .collect();
+                                ui.data_mut(|d| d.insert_temp(cache_key, (nodes_snapshot, g.clone())));
+                                g
+                            }
+                        };
 
-                        // Cursor tooltip
-                        let max_hz = (sr / 2.0).max(20_001.0);
-                        if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
-                            if curve_rect.contains(hover) {
-                                let freq = crv::screen_to_freq(hover.x, curve_rect, max_hz);
-                                let val  = crv::screen_y_to_physical(hover.y, active_idx, db_min, db_max, curve_rect);
-                                let unit = crv::CURVE_Y_UNIT[active_idx];
-                                let freq_str = if freq >= 1_000.0 {
-                                    format!("{:.2} kHz", freq / 1_000.0)
-                                } else {
-                                    format!("{:.0} Hz", freq)
-                                };
-                                let val_str = match active_idx {
-                                    1 => format!("{:.2} {}", val, unit),
-                                    2 | 3 => format!("{:.1} {}", val, unit),
-                                    6 => format!("{:.1} {}", val, unit),
-                                    _ => format!("{:.1} {}", val, unit),
-                                };
-                                let label   = format!("{}\n{}", freq_str, val_str);
-                                let tip_pos = hover + egui::vec2(12.0, -28.0);
-                                let font    = egui::FontId::proportional(10.0);
-                                let galley  = ui.painter().layout_no_wrap(
-                                    label.clone(), font.clone(), th::GRID_TEXT,
-                                );
-                                let text_size = galley.size();
-                                let bg_rect = egui::Rect::from_min_size(
-                                    tip_pos - egui::vec2(3.0, 3.0),
-                                    text_size + egui::vec2(6.0, 6.0),
-                                );
-                                ui.painter().rect_filled(bg_rect, 2.0, egui::Color32::from_black_alpha(180));
-                                ui.painter().text(tip_pos, egui::Align2::LEFT_TOP, label, font, th::GRID_TEXT);
+                        for i in 0..NUM_CURVE_SETS {
+                            if i == active_idx { continue; }
+                            crv::paint_response_curve(
+                                ui.painter(), curve_rect, &all_gains[i], i,
+                                th::curve_color_dim(i), 1.0,
+                                db_min, db_max, atk_ms, rel_ms, sr,
+                                crate::dsp::pipeline::FFT_SIZE,
+                                tilts[i], offsets[i],
+                            );
+                        }
+                        crv::paint_response_curve(
+                            ui.painter(), curve_rect, &all_gains[active_idx], active_idx,
+                            th::curve_color_lit(active_idx), 2.0,
+                            db_min, db_max, atk_ms, rel_ms, sr,
+                            crate::dsp::pipeline::FFT_SIZE,
+                            tilts[active_idx], offsets[active_idx],
+                        );
+
+                        // Interactive nodes — Dynamics tab only
+                        if active_tab == 0 {
+                            let mut nodes = nodes_snapshot[active_idx];
+                            if crv::curve_widget(
+                                ui, curve_rect, &mut nodes, &all_gains[active_idx],
+                                active_idx, db_min, db_max, atk_ms, rel_ms, sr,
+                                crate::dsp::pipeline::FFT_SIZE,
+                                tilts[active_idx], offsets[active_idx],
+                            ) {
+                                params.curve_nodes.lock()[active_idx] = nodes;
+                                if num_bins > 0 {
+                                    let full_gains = crv::compute_curve_response(
+                                        &nodes, num_bins, sr,
+                                        crate::dsp::pipeline::FFT_SIZE,
+                                    );
+                                    if let Some(tx_arc) = curve_tx.get(active_idx) {
+                                        if let Some(mut tx) = tx_arc.try_lock() {
+                                            tx.input_buffer_mut().copy_from_slice(&full_gains);
+                                            tx.publish();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Cursor tooltip
+                            let max_hz = (sr / 2.0).max(20_001.0);
+                            if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
+                                if curve_rect.contains(hover) {
+                                    let freq = crv::screen_to_freq(hover.x, curve_rect, max_hz);
+                                    let val  = crv::screen_y_to_physical(hover.y, active_idx, db_min, db_max, curve_rect);
+                                    let unit = crv::curve_y_unit(active_idx);
+                                    let freq_str = if freq >= 1_000.0 {
+                                        format!("{:.2} kHz", freq / 1_000.0)
+                                    } else {
+                                        format!("{:.0} Hz", freq)
+                                    };
+                                    let val_str = match active_idx {
+                                        1 => format!("{:.2} {}", val, unit),
+                                        2 | 3 => format!("{:.1} {}", val, unit),
+                                        6 => format!("{:.1} {}", val, unit),
+                                        _ => format!("{:.1} {}", val, unit),
+                                    };
+                                    let label   = format!("{}\n{}", freq_str, val_str);
+                                    let tip_pos = hover + egui::vec2(12.0, -28.0);
+                                    let font    = egui::FontId::proportional(10.0);
+                                    let galley  = ui.painter().layout_no_wrap(
+                                        label.clone(), font.clone(), th::GRID_TEXT,
+                                    );
+                                    let text_size = galley.size();
+                                    let bg_rect = egui::Rect::from_min_size(
+                                        tip_pos - egui::vec2(3.0, 3.0),
+                                        text_size + egui::vec2(6.0, 6.0),
+                                    );
+                                    ui.painter().rect_filled(bg_rect, 2.0, egui::Color32::from_black_alpha(180));
+                                    ui.painter().text(tip_pos, egui::Align2::LEFT_TOP, label, font, th::GRID_TEXT);
+                                }
                             }
                         }
                     }
 
-                    // Tab-specific overlay in the main area (Harmonic placeholder)
+                    // Harmonic placeholder text
                     if active_tab == 2 {
                         ui.painter().text(
                             curve_rect.center(),
@@ -401,8 +518,7 @@ pub fn create_editor(
                                     th::LABEL_DIM,
                                 );
 
-                                // Tilt and Offset — active-curve–coloured, affect whichever
-                                // curve is currently selected.
+                                // Tilt and Offset — active-curve–coloured
                                 ui.add_space(8.0);
                                 let crv_col = th::curve_color_lit(active_idx);
                                 macro_rules! cknob {
@@ -424,8 +540,7 @@ pub fn create_editor(
                                 }
                             }
                             1 => {
-                                // Effects: mode buttons + contextual knob
-                                let cur_mode = params.effect_mode.value();
+                                // Effects: mode buttons + contextual knobs
                                 ui.add_space(4.0);
                                 let modes: &[(&str, crate::params::EffectMode)] = &[
                                     ("BYPASS",   crate::params::EffectMode::Bypass),

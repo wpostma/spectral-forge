@@ -14,11 +14,13 @@ pub struct SpectralForge {
     shared:   Option<bridge::SharedState>,
     // Cloned Arc handles for the GUI — wired up in Default::default() so editor()
     // always has live handles regardless of whether the host calls it before initialize().
-    gui_curve_tx:       Vec<Arc<parking_lot::Mutex<triple_buffer::Input<Vec<f32>>>>>,
-    gui_sample_rate:    Option<Arc<bridge::AtomicF32>>,
-    gui_num_bins:       usize,
-    gui_spectrum_rx:    Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
-    gui_suppression_rx: Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
+    gui_curve_tx:          Vec<Arc<parking_lot::Mutex<triple_buffer::Input<Vec<f32>>>>>,
+    gui_phase_curve_tx:    Arc<parking_lot::Mutex<triple_buffer::Input<Vec<f32>>>>,
+    gui_freeze_curve_tx:   Vec<Arc<parking_lot::Mutex<triple_buffer::Input<Vec<f32>>>>>,
+    gui_sample_rate:       Option<Arc<bridge::AtomicF32>>,
+    gui_num_bins:          usize,
+    gui_spectrum_rx:       Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
+    gui_suppression_rx:    Option<Arc<parking_lot::Mutex<triple_buffer::Output<Vec<f32>>>>>,
     /// Liveness token: the editor holds a Weak clone of this. When the plugin
     /// is destroyed (this Arc drops), the editor detects it and closes itself.
     plugin_alive: Arc<()>,
@@ -33,17 +35,21 @@ impl Default for SpectralForge {
         let num_bins = dsp::pipeline::FFT_SIZE / 2 + 1;
         let shared = bridge::SharedState::new(num_bins, dummy_sr);
 
-        let gui_curve_tx       = shared.curve_tx.clone();
-        let gui_sample_rate    = Some(shared.sample_rate.clone());
-        let gui_num_bins       = shared.num_bins;
-        let gui_spectrum_rx    = Some(shared.spectrum_rx.clone());
-        let gui_suppression_rx = Some(shared.suppression_rx.clone());
+        let gui_curve_tx         = shared.curve_tx.clone();
+        let gui_phase_curve_tx   = shared.phase_curve_tx.clone();
+        let gui_freeze_curve_tx  = shared.freeze_curve_tx.clone();
+        let gui_sample_rate      = Some(shared.sample_rate.clone());
+        let gui_num_bins         = shared.num_bins;
+        let gui_spectrum_rx      = Some(shared.spectrum_rx.clone());
+        let gui_suppression_rx   = Some(shared.suppression_rx.clone());
 
         Self {
             params:   Arc::new(SpectralForgeParams::default()),
             pipeline: None,
             shared:   Some(shared),
             gui_curve_tx,
+            gui_phase_curve_tx,
+            gui_freeze_curve_tx,
             gui_sample_rate,
             gui_num_bins,
             gui_spectrum_rx,
@@ -85,6 +91,8 @@ impl Plugin for SpectralForge {
         editor_ui::create_editor(
             self.params.clone(),
             self.gui_curve_tx.clone(),
+            self.gui_phase_curve_tx.clone(),
+            self.gui_freeze_curve_tx.clone(),
             self.gui_sample_rate.clone(),
             self.gui_num_bins,
             self.gui_spectrum_rx.clone(),
@@ -116,6 +124,28 @@ impl Plugin for SpectralForge {
             for (i, tx_arc) in sh.curve_tx.iter().enumerate() {
                 let gains = crate::editor::curve::compute_curve_response(
                     &nodes_snapshot[i], num_bins, sr, dsp::pipeline::FFT_SIZE,
+                );
+                if let Some(mut tx) = tx_arc.try_lock() {
+                    tx.input_buffer_mut().copy_from_slice(&gains);
+                    tx.publish();
+                }
+            }
+
+            // Push initial phase curve.
+            let phase_nodes = *self.params.phase_curve_nodes.lock();
+            let phase_gains = crate::editor::curve::compute_curve_response(
+                &phase_nodes, num_bins, sr, dsp::pipeline::FFT_SIZE,
+            );
+            if let Some(mut tx) = sh.phase_curve_tx.try_lock() {
+                tx.input_buffer_mut().copy_from_slice(&phase_gains);
+                tx.publish();
+            }
+
+            // Push initial freeze curves (4 channels).
+            let freeze_nodes = *self.params.freeze_curve_nodes.lock();
+            for (i, tx_arc) in sh.freeze_curve_tx.iter().enumerate() {
+                let gains = crate::editor::curve::compute_curve_response(
+                    &freeze_nodes[i], num_bins, sr, dsp::pipeline::FFT_SIZE,
                 );
                 if let Some(mut tx) = tx_arc.try_lock() {
                     tx.input_buffer_mut().copy_from_slice(&gains);

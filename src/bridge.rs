@@ -24,6 +24,14 @@ pub struct SharedState {
     pub suppression_tx: TbInput<Vec<f32>>,
     pub suppression_rx: Arc<Mutex<TbOutput<Vec<f32>>>>,
 
+    // Phase curve: GUI → Audio (single channel)
+    pub phase_curve_tx: Arc<Mutex<TbInput<Vec<f32>>>>,
+    pub phase_curve_rx: TbOutput<Vec<f32>>,
+
+    // Freeze curves: GUI → Audio (4 channels: Length, Threshold, Portamento, Resistance)
+    pub freeze_curve_tx: Vec<Arc<Mutex<TbInput<Vec<f32>>>>>,
+    pub freeze_curve_rx: Vec<TbOutput<Vec<f32>>>,
+
     // Scalars (written once at initialize, read by GUI)
     pub sample_rate:      Arc<AtomicF32>,
     pub pending_engine:   Arc<AtomicU8>,
@@ -67,6 +75,18 @@ impl SharedState {
         let (spectrum_tx, spectrum_rx) = TripleBuffer::new(&zero_bins).split();
         let (suppression_tx, suppression_rx) = TripleBuffer::new(&zero_bins).split();
 
+        let (phase_curve_tx, phase_curve_rx) = TripleBuffer::new(&zero_bins).split();
+
+        const NUM_FREEZE_CURVES: usize = 4;
+        let mut freeze_curve_tx = Vec::with_capacity(NUM_FREEZE_CURVES);
+        let mut freeze_curve_rx = Vec::with_capacity(NUM_FREEZE_CURVES);
+        for _ in 0..NUM_FREEZE_CURVES {
+            let init = vec![1.0f32; num_bins];
+            let (tx, rx) = TripleBuffer::new(&init).split();
+            freeze_curve_tx.push(Arc::new(Mutex::new(tx)));
+            freeze_curve_rx.push(rx);
+        }
+
         Self {
             num_bins,
             curve_tx,
@@ -75,6 +95,10 @@ impl SharedState {
             spectrum_rx: Arc::new(Mutex::new(spectrum_rx)),
             suppression_tx,
             suppression_rx: Arc::new(Mutex::new(suppression_rx)),
+            phase_curve_tx: Arc::new(Mutex::new(phase_curve_tx)),
+            phase_curve_rx,
+            freeze_curve_tx,
+            freeze_curve_rx,
             sample_rate: Arc::new(AtomicF32::new(sample_rate)),
             pending_engine: Arc::new(AtomicU8::new(0)),
             sidechain_active: Arc::new(AtomicBool::new(false)),

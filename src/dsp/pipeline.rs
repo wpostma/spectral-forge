@@ -44,9 +44,17 @@ pub struct Pipeline {
     dry_delay: Vec<f32>,
     /// Current write head into dry_delay (wraps at DRY_DELAY_SIZE).
     dry_delay_write: usize,
-    /// Captured full complex spectrum for Spectral Freeze (Re+Im per bin).
+    /// Per-bin frozen complex state (current Freeze output, interpolating towards target).
     frozen_bins: Vec<Complex<f32>>,
-    /// True once Freeze has captured its first frame; reset to false when mode changes.
+    /// Per-bin target state that frozen_bins interpolates towards during portamento.
+    freeze_target: Vec<Complex<f32>>,
+    /// Portamento progress per bin [0.0, 1.0]. 1.0 = settled at frozen_bins.
+    freeze_port_t: Vec<f32>,
+    /// Hops spent in current settled state (after portamento completes).
+    freeze_hold_hops: Vec<u32>,
+    /// Accumulated energy above threshold since the last state change.
+    freeze_accum: Vec<f32>,
+    /// True once the per-bin state machine has been initialised for the current Freeze session.
     freeze_captured: bool,
     /// xorshift64 PRNG state for Phase Randomize. Must never be zero.
     rng_state: u64,
@@ -55,6 +63,10 @@ pub struct Pipeline {
     /// Pre-allocated curve read caches — populated via copy_from_slice each block
     /// so the audio thread never allocates. One Vec per curve channel (7 total).
     curve_cache: [Vec<f32>; 7],
+    /// Per-bin phase-amount curve: multiplier applied to phase_rand_amount per bin.
+    phase_curve_cache: Vec<f32>,
+    /// Per-bin Freeze parameter curves: [0]=Length, [1]=Threshold, [2]=Portamento, [3]=Resistance.
+    freeze_curve_cache: [Vec<f32>; 4],
     sample_rate: f32,
 }
 
@@ -104,10 +116,16 @@ impl Pipeline {
             dry_delay: vec![0.0f32; 2 * DRY_DELAY_SIZE],
             dry_delay_write: 0,
             frozen_bins:       vec![Complex::new(0.0f32, 0.0f32); NUM_BINS],
+            freeze_target:     vec![Complex::new(0.0f32, 0.0f32); NUM_BINS],
+            freeze_port_t:     vec![1.0f32; NUM_BINS],
+            freeze_hold_hops:  vec![0u32; NUM_BINS],
+            freeze_accum:      vec![0.0f32; NUM_BINS],
             freeze_captured:   false,
             rng_state:         0xdeadbeef_cafebabe_u64,
             contrast_engine,
             curve_cache: std::array::from_fn(|_| vec![1.0f32; NUM_BINS]),
+            phase_curve_cache: vec![1.0f32; NUM_BINS],
+            freeze_curve_cache: std::array::from_fn(|_| vec![1.0f32; NUM_BINS]),
             sample_rate,
         }
     }
@@ -120,7 +138,11 @@ impl Pipeline {
         self.sc_env_state = vec![0.0f32; NUM_BINS];
         self.dry_delay.fill(0.0);
         self.dry_delay_write = 0;
-        for b in self.frozen_bins.iter_mut() { *b = Complex::new(0.0, 0.0); }
+        for b in self.frozen_bins.iter_mut()    { *b = Complex::new(0.0, 0.0); }
+        for b in self.freeze_target.iter_mut()  { *b = Complex::new(0.0, 0.0); }
+        for t in self.freeze_port_t.iter_mut()  { *t = 1.0; }
+        for h in self.freeze_hold_hops.iter_mut() { *h = 0; }
+        for a in self.freeze_accum.iter_mut()   { *a = 0.0; }
         self.freeze_captured = false;
         // rng_state intentionally not reset — continuity across SR changes is harmless
         self.engine.reset(sample_rate, FFT_SIZE);
@@ -180,6 +202,11 @@ impl Pipeline {
         self.curve_cache[4].copy_from_slice(shared.curve_rx[4].read());
         self.curve_cache[5].copy_from_slice(shared.curve_rx[5].read());
         self.curve_cache[6].copy_from_slice(shared.curve_rx[6].read());
+        self.phase_curve_cache.copy_from_slice(shared.phase_curve_rx.read());
+        self.freeze_curve_cache[0].copy_from_slice(shared.freeze_curve_rx[0].read());
+        self.freeze_curve_cache[1].copy_from_slice(shared.freeze_curve_rx[1].read());
+        self.freeze_curve_cache[2].copy_from_slice(shared.freeze_curve_rx[2].read());
+        self.freeze_curve_cache[3].copy_from_slice(shared.freeze_curve_rx[3].read());
 
         // --- Sidechain processing ---
         let sc_active = !aux.inputs.is_empty();
@@ -373,10 +400,19 @@ impl Pipeline {
         // Combined normalization: 1 / (FFT_SIZE * 1.5) = 2 / (3 * FFT_SIZE)
         let norm = 2.0_f32 / (3.0 * FFT_SIZE as f32);
 
-        let frozen_bins     = &mut self.frozen_bins;
-        let freeze_captured = &mut self.freeze_captured;
-        let rng_state       = &mut self.rng_state;
-        let contrast_engine = &mut self.contrast_engine;
+        let frozen_bins      = &mut self.frozen_bins;
+        let freeze_target    = &mut self.freeze_target;
+        let freeze_port_t    = &mut self.freeze_port_t;
+        let freeze_hold_hops = &mut self.freeze_hold_hops;
+        let freeze_accum     = &mut self.freeze_accum;
+        let freeze_captured  = &mut self.freeze_captured;
+        let rng_state        = &mut self.rng_state;
+        let contrast_engine  = &mut self.contrast_engine;
+        let phase_curve_cache    = &self.phase_curve_cache;
+        let freeze_curve_cache_0 = &self.freeze_curve_cache[0];
+        let freeze_curve_cache_1 = &self.freeze_curve_cache[1];
+        let freeze_curve_cache_2 = &self.freeze_curve_cache[2];
+        let freeze_curve_cache_3 = &self.freeze_curve_cache[3];
 
         self.stft.process_overlap_add(buffer, OVERLAP, |channel, block| {
             // Analysis window + input gain
@@ -423,28 +459,75 @@ impl Pipeline {
                 crate::params::EffectMode::Bypass => {}
 
                 crate::params::EffectMode::Freeze => {
+                    // Duration of one hop in milliseconds.
+                    let hop_ms = FFT_SIZE as f32 / (OVERLAP as f32 * sample_rate) * 1000.0;
+
                     if !*freeze_captured {
-                        // Capture the entire complex frame (magnitude + phase).
-                        // Copying Re+Im ensures DC and Nyquist bins stay real,
-                        // and avoids the amplitude spikes from phase-drift reconstruction.
+                        // First call: capture current frame as initial frozen state.
                         frozen_bins.copy_from_slice(complex_buf);
+                        freeze_target.copy_from_slice(complex_buf);
+                        for t in freeze_port_t.iter_mut()   { *t = 1.0; }
+                        for h in freeze_hold_hops.iter_mut() { *h = 0; }
+                        for a in freeze_accum.iter_mut()    { *a = 0.0; }
                         *freeze_captured = true;
                     }
-                    // Replace current frame wholesale with the captured one.
-                    complex_buf.copy_from_slice(frozen_bins);
+
+                    let n = complex_buf.len();
+                    for k in 0..n {
+                        // Map per-bin curve gains to physical parameter values.
+                        let length_ms  = (freeze_curve_cache_0[k] * 500.0).clamp(0.0, 2000.0);
+                        let length_hops = (length_ms / hop_ms).ceil() as u32;
+
+                        let thr_gain = freeze_curve_cache_1[k];
+                        let thr_db   = if thr_gain > 1e-10 { 20.0 * thr_gain.log10() } else { -120.0 };
+                        let threshold_db = (-20.0 + thr_db * (60.0 / 18.0)).clamp(-80.0, 0.0);
+                        let threshold_lin = 10.0f32.powf(threshold_db / 20.0);
+
+                        let port_ms  = (freeze_curve_cache_2[k] * 100.0).clamp(0.0, 1000.0);
+                        let port_hops = (port_ms / hop_ms).max(0.5);
+
+                        let resistance = (freeze_curve_cache_3[k] * 1.0).clamp(0.0, 5.0);
+
+                        if freeze_port_t[k] < 1.0 {
+                            // Portamento in progress: advance and interpolate.
+                            freeze_port_t[k] = (freeze_port_t[k] + 1.0 / port_hops).min(1.0);
+                            let t = freeze_port_t[k];
+                            frozen_bins[k] = Complex::new(
+                                frozen_bins[k].re * (1.0 - t) + freeze_target[k].re * t,
+                                frozen_bins[k].im * (1.0 - t) + freeze_target[k].im * t,
+                            );
+                        } else {
+                            // Settled: hold and accumulate energy toward next transition.
+                            freeze_hold_hops[k] += 1;
+                            let mag = complex_buf[k].norm();
+                            if mag > threshold_lin {
+                                freeze_accum[k] += mag - threshold_lin;
+                            }
+                            // Trigger state change when hold duration and resistance both met.
+                            if freeze_hold_hops[k] >= length_hops && freeze_accum[k] >= resistance {
+                                freeze_target[k]    = complex_buf[k];
+                                freeze_port_t[k]    = 0.0;
+                                freeze_hold_hops[k] = 0;
+                                freeze_accum[k]     = 0.0;
+                            }
+                        }
+
+                        complex_buf[k] = frozen_bins[k];
+                    }
                 }
 
                 crate::params::EffectMode::PhaseRand => {
-                    let scale = phase_rand_amount * std::f32::consts::PI;
-                    let last  = complex_buf.len() - 1;
+                    let last = complex_buf.len() - 1;
                     for k in 0..complex_buf.len() {
                         // Always advance PRNG to keep the sequence independent of skipping.
                         *rng_state ^= *rng_state << 13;
                         *rng_state ^= *rng_state >> 7;
                         *rng_state ^= *rng_state << 17;
-                        // DC (k=0) and Nyquist (k=last) must stay real for IFFT
-                        // correctness — skipping phase rotation preserves Im=0.
+                        // DC (k=0) and Nyquist (k=last) must stay real for IFFT correctness.
                         if k == 0 || k == last { continue; }
+                        // Per-bin multiplier from phase_curve_cache scales the global amount.
+                        let per_bin = phase_curve_cache[k].clamp(0.0, 2.0);
+                        let scale   = phase_rand_amount * per_bin * std::f32::consts::PI;
                         let rand_phase = (*rng_state as f32 / u64::MAX as f32 * 2.0 - 1.0) * scale;
                         let (mag, phase) = (complex_buf[k].norm(), complex_buf[k].arg());
                         complex_buf[k] = Complex::from_polar(mag, phase + rand_phase);
