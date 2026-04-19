@@ -197,6 +197,16 @@ impl Pipeline {
         self.freeze_curve_cache[2].copy_from_slice(shared.freeze_curve_rx[2].read());
         self.freeze_curve_cache[3].copy_from_slice(shared.freeze_curve_rx[3].read());
 
+        // Sync GUI routing matrix → DSP send matrix (non-blocking; skip if GUI holds lock).
+        if let Some(matrix_guard) = params.fx_route_matrix.try_lock() {
+            self.fx_matrix.send = *matrix_guard;
+        }
+
+        // Read per-slot channel targets (non-blocking; fall back to All if GUI holds lock).
+        let slot0_target = params.fx_module_targets.try_lock()
+            .map(|g| g[0])
+            .unwrap_or(FxChannelTarget::All);
+
         // --- Sidechain processing ---
         let sc_active = !aux.inputs.is_empty();
 
@@ -438,7 +448,7 @@ impl Pipeline {
                 sidechain_arg,
                 &params,
                 effect_mode,
-                FxChannelTarget::All,
+                slot0_target,
                 sample_rate,
                 channel_supp_buf,
                 num_bins,
