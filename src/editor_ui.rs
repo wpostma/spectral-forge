@@ -203,7 +203,11 @@ pub fn create_editor(
                     }
 
                     // ── Spectrum / curve area ─────────────────────────────────────
-                    let strip_height = 105.0;
+                    // strip_height reserves space for: control knobs (105) + routing matrix section
+                    // (8 × 48px cells + ~30px header/padding = 414). The window height (1010) was
+                    // set to accommodate all three areas.
+                    const MATRIX_AREA_H: f32 = 8.0 * 48.0 + 30.0; // 414 px
+                    let strip_height = 105.0 + MATRIX_AREA_H;
                     let avail = ui.available_rect_before_wrap();
                     let curve_rect = egui::Rect::from_min_max(
                         avail.min,

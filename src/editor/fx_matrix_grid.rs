@@ -1,4 +1,4 @@
-use nih_plug_egui::egui::{self, Rect, Stroke, StrokeKind, Ui, Vec2};
+use nih_plug_egui::egui::{self, Rect, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use crate::editor::theme as th;
 use crate::params::FxModuleType;
 
@@ -88,7 +88,7 @@ pub fn paint_fx_matrix_grid(
                 painter.rect(cell_rect, 0.0, bg, Stroke::new(0.5, th::GRID_LINE), StrokeKind::Middle);
 
                 let send_val = &mut send_matrix[col][row];
-                ui.allocate_ui_at_rect(cell_rect.shrink(4.0), |ui| {
+                ui.allocate_new_ui(UiBuilder::new().max_rect(cell_rect.shrink(4.0)), |ui| {
                     ui.add(
                         egui::DragValue::new(send_val)
                             .range(0.0..=1.0)
