@@ -1,7 +1,8 @@
 use num_complex::Complex;
 use realfft::RealFftPlanner;
 use nih_plug::util::StftHelper;
-use crate::dsp::engines::{BinParams, SpectralEngine, create_engine, EngineSelection};
+use crate::dsp::engines::BinParams;
+use crate::params::FxChannelTarget;
 use crate::bridge::SharedState;
 
 pub const FFT_SIZE: usize = 2048;
@@ -29,8 +30,7 @@ pub struct Pipeline {
     sc_envelope:  Vec<f32>,   // smoothed sidechain magnitude per bin
     sc_env_state: Vec<f32>,   // one-pole LP state (separate from main envelope)
     sc_complex_buf: Vec<Complex<f32>>,
-    engine:   Box<dyn SpectralEngine>,
-    engine_r: Box<dyn SpectralEngine>,  // right-channel engine for Independent mode
+    fx_matrix: crate::dsp::fx_matrix::FxMatrix,
     bp_threshold: Vec<f32>,
     bp_ratio:     Vec<f32>,
     bp_attack:    Vec<f32>,
@@ -58,8 +58,6 @@ pub struct Pipeline {
     freeze_captured: bool,
     /// xorshift64 PRNG state for Phase Randomize. Must never be zero.
     rng_state: u64,
-    /// Dedicated engine for Spectral Contrast (runs as post-compressor effects pass).
-    contrast_engine: Box<dyn SpectralEngine>,
     /// Pre-allocated curve read caches — populated via copy_from_slice each block
     /// so the audio thread never allocates. One Vec per curve channel (7 total).
     curve_cache: [Vec<f32>; 7],
@@ -84,12 +82,7 @@ impl Pipeline {
         let complex_buf    = fft_plan.make_output_vec();
         let sc_complex_buf = fft_plan.make_output_vec();
 
-        let mut engine = create_engine(EngineSelection::SpectralCompressor);
-        engine.reset(sample_rate, FFT_SIZE);
-        let mut engine_r = create_engine(EngineSelection::SpectralCompressor);
-        engine_r.reset(sample_rate, FFT_SIZE);
-        let mut contrast_engine = create_engine(EngineSelection::SpectralContrast);
-        contrast_engine.reset(sample_rate, FFT_SIZE);
+        let fx_matrix = crate::dsp::fx_matrix::FxMatrix::new(sample_rate, FFT_SIZE);
 
         Self {
             stft: StftHelper::new(num_channels, FFT_SIZE, 0),
@@ -104,8 +97,7 @@ impl Pipeline {
             suppression_buf:  vec![0.0; NUM_BINS],
             channel_supp_buf: vec![0.0; NUM_BINS],
             complex_buf,
-            engine,
-            engine_r,
+            fx_matrix,
             bp_threshold: vec![-20.0; NUM_BINS],
             bp_ratio:     vec![4.0;   NUM_BINS],
             bp_attack:    vec![10.0;  NUM_BINS],
@@ -122,7 +114,6 @@ impl Pipeline {
             freeze_accum:      vec![0.0f32; NUM_BINS],
             freeze_captured:   false,
             rng_state:         0xdeadbeef_cafebabe_u64,
-            contrast_engine,
             curve_cache: std::array::from_fn(|_| vec![1.0f32; NUM_BINS]),
             phase_curve_cache: vec![1.0f32; NUM_BINS],
             freeze_curve_cache: std::array::from_fn(|_| vec![1.0f32; NUM_BINS]),
@@ -145,9 +136,7 @@ impl Pipeline {
         for a in self.freeze_accum.iter_mut()   { *a = 0.0; }
         self.freeze_captured = false;
         // rng_state intentionally not reset — continuity across SR changes is harmless
-        self.engine.reset(sample_rate, FFT_SIZE);
-        self.engine_r.reset(sample_rate, FFT_SIZE);
-        self.contrast_engine.reset(sample_rate, FFT_SIZE);
+        self.fx_matrix.reset(sample_rate, FFT_SIZE);
     }
 
     pub fn process(
@@ -207,6 +196,16 @@ impl Pipeline {
         self.freeze_curve_cache[1].copy_from_slice(shared.freeze_curve_rx[1].read());
         self.freeze_curve_cache[2].copy_from_slice(shared.freeze_curve_rx[2].read());
         self.freeze_curve_cache[3].copy_from_slice(shared.freeze_curve_rx[3].read());
+
+        // Sync GUI routing matrix → DSP send matrix (non-blocking; skip if GUI holds lock).
+        if let Some(matrix_guard) = params.fx_route_matrix.try_lock() {
+            self.fx_matrix.send = *matrix_guard;
+        }
+
+        // Read per-slot channel targets (non-blocking; fall back to All if GUI holds lock).
+        let slot0_target = params.fx_module_targets.try_lock()
+            .map(|g| g[0])
+            .unwrap_or(FxChannelTarget::All);
 
         // --- Sidechain processing ---
         let sc_active = !aux.inputs.is_empty();
@@ -321,9 +320,8 @@ impl Pipeline {
 
         // Read stereo link mode
         use crate::params::StereoLink;
-        let stereo_link    = params.stereo_link.value();
-        let is_independent = stereo_link == StereoLink::Independent;
-        let is_mid_side    = stereo_link == StereoLink::MidSide;
+        let stereo_link = params.stereo_link.value();
+        let is_mid_side = stereo_link == StereoLink::MidSide;
 
         // Precompute input/output linear gains for capture into STFT closure
         let input_linear  = 10.0f32.powf(input_gain_db  / 20.0);
@@ -371,8 +369,7 @@ impl Pipeline {
         let fft_plan  = self.fft_plan.clone();
         let ifft_plan = self.ifft_plan.clone();
         let window         = &self.window;
-        let engine            = &mut self.engine;
-        let engine_r          = &mut self.engine_r;
+        let fx_matrix         = &mut self.fx_matrix;
         let complex_buf       = &mut self.complex_buf;
         let spectrum_buf      = &mut self.spectrum_buf;
         let suppression_buf   = &mut self.suppression_buf;
@@ -407,7 +404,6 @@ impl Pipeline {
         let freeze_accum     = &mut self.freeze_accum;
         let freeze_captured  = &mut self.freeze_captured;
         let rng_state        = &mut self.rng_state;
-        let contrast_engine  = &mut self.contrast_engine;
         let phase_curve_cache    = &self.phase_curve_cache;
         let freeze_curve_cache_0 = &self.freeze_curve_cache[0];
         let freeze_curve_cache_1 = &self.freeze_curve_cache[1];
@@ -443,13 +439,20 @@ impl Pipeline {
                 smoothing_semitones: suppression_width,
             };
 
-            // Select engine: Independent mode uses engine_r for channel 1
-            let active_engine: &mut Box<dyn SpectralEngine> = if is_independent && channel == 1 {
-                engine_r
-            } else {
-                engine
-            };
-            active_engine.process_bins(complex_buf, sidechain_arg, &params, sample_rate, channel_supp_buf);
+            // Run the compressor/contrast engine through fx_matrix.
+            // Freeze and PhaseRand DSP remains in the match block below.
+            fx_matrix.process_hop(
+                channel,
+                stereo_link,
+                complex_buf,
+                sidechain_arg,
+                &params,
+                effect_mode,
+                slot0_target,
+                sample_rate,
+                channel_supp_buf,
+                num_bins,
+            );
             for k in 0..channel_supp_buf.len() {
                 if channel_supp_buf[k] > suppression_buf[k] { suppression_buf[k] = channel_supp_buf[k]; }
             }
@@ -457,6 +460,9 @@ impl Pipeline {
             // Effects pass — modifies complex_buf in-place after compression.
             match effect_mode {
                 crate::params::EffectMode::Bypass => {}
+                crate::params::EffectMode::SpectralContrast => {
+                    // Handled inside fx_matrix.process_hop() above (routes to contrast engine).
+                }
 
                 crate::params::EffectMode::Freeze => {
                     // Duration of one hop in milliseconds.
@@ -534,20 +540,6 @@ impl Pipeline {
                     }
                 }
 
-                crate::params::EffectMode::SpectralContrast => {
-                    // Delegate to SpectralContrastEngine which handles the full
-                    // 4-pass algorithm: spatial mean → temporal tracking → gain mask
-                    // smoothing (anti-warbling) → apply with auto-makeup + mix.
-                    contrast_engine.process_bins(
-                        complex_buf, None, &params, sample_rate, channel_supp_buf,
-                    );
-                    // Fold contrast suppression into the peak-hold display buffer.
-                    for k in 0..channel_supp_buf.len() {
-                        if channel_supp_buf[k] > suppression_buf[k] {
-                            suppression_buf[k] = channel_supp_buf[k];
-                        }
-                    }
-                }
             }
 
             // When leaving Freeze mode, clear the captured flag so re-engaging always
