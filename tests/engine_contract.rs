@@ -299,3 +299,64 @@ fn contrast_expands_peaked_spectrum() {
         assert!(s.is_finite() && s >= 0.0, "suppression contract violated: {s}");
     }
 }
+
+#[test]
+fn fx_matrix_spectral_contrast_produces_finite_output() {
+    use spectral_forge::dsp::fx_matrix::FxMatrix;
+    use spectral_forge::dsp::engines::BinParams;
+    use spectral_forge::params::{StereoLink, EffectMode, FxChannelTarget};
+    use num_complex::Complex;
+
+    let num_bins = 1025usize;
+    let mut fx = FxMatrix::new(44100.0, 2048);
+
+    // A non-trivial spectrum with variation (contrast engine needs bins to differ)
+    let mut bins: Vec<Complex<f32>> = (0..num_bins)
+        .map(|k| {
+            let mag = if k % 10 == 0 { 1.0 } else { 0.1 };
+            Complex::new(mag * (k as f32 * 0.01).cos(), mag * (k as f32 * 0.01).sin())
+        })
+        .collect();
+
+    let threshold = vec![-20.0f32; num_bins];
+    let ratio     = vec![4.0f32; num_bins];
+    let attack    = vec![10.0f32; num_bins];
+    let release   = vec![80.0f32; num_bins];
+    let knee      = vec![6.0f32; num_bins];
+    let makeup    = vec![0.0f32; num_bins];
+    let mix       = vec![1.0f32; num_bins];
+    let params = BinParams {
+        threshold_db: &threshold,
+        ratio:        &ratio,
+        attack_ms:    &attack,
+        release_ms:   &release,
+        knee_db:      &knee,
+        makeup_db:    &makeup,
+        mix:          &mix,
+        sensitivity:  0.0,
+        auto_makeup:  false,
+        smoothing_semitones: 0.0,
+    };
+
+    let mut supp_out = vec![0.0f32; num_bins];
+    fx.process_hop(
+        0,
+        StereoLink::Linked,
+        &mut bins,
+        None,
+        &params,
+        EffectMode::SpectralContrast,
+        FxChannelTarget::All,
+        44100.0,
+        &mut supp_out,
+        num_bins,
+    );
+
+    for (k, b) in bins.iter().enumerate() {
+        assert!(b.re.is_finite() && b.im.is_finite(),
+            "bin {k} not finite after contrast: {b:?}");
+    }
+    // Suppression should be populated (contrast modifies bins and writes supp)
+    assert!(supp_out.iter().any(|&s| s > 0.0),
+        "expected some non-zero suppression from SpectralContrast");
+}

@@ -450,7 +450,9 @@ impl Pipeline {
             // Effects pass — modifies complex_buf in-place after compression.
             match effect_mode {
                 crate::params::EffectMode::Bypass => {}
-                crate::params::EffectMode::SpectralContrast => {}
+                crate::params::EffectMode::SpectralContrast => {
+                    // Handled inside fx_matrix.process_hop() above (routes to contrast engine).
+                }
 
                 crate::params::EffectMode::Freeze => {
                     // Duration of one hop in milliseconds.
