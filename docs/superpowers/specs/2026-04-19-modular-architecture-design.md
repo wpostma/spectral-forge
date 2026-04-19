@@ -305,12 +305,13 @@ pub editing_curve: Arc<Mutex<u8>>,
 
 **Default state:**
 - Slot 0: `ModuleType::Dynamics`, name `"Dynamics"`, target `All`, sidechain `255`
-- Slot 1: `ModuleType::Gain`, name `"Gain"`, target `All`, sidechain `255`
-- Slots 2–7: `ModuleType::Empty`, names `"Slot 2"` … `"Slot 7"`
+- Slot 1: `ModuleType::Dynamics`, name `"Dynamics 2"`, target `All`, sidechain `255`
+- Slot 2: `ModuleType::Gain`, name `"Gain"`, target `All`, sidechain `255`
+- Slots 3–7: `ModuleType::Empty`, names `"Slot 3"` … `"Slot 7"`
 - Slot 8: `ModuleType::Master`, name `"Master"`, immutable
 - All `slot_curve_nodes`: default neutral nodes per curve type
 - All `slot_curve_meta`: `(0.0, 0.0)` (no tilt, no offset)
-- Default routing: Slot 0 → Master (1.0), Slot 1 → Master (1.0), all others zeroed
+- Default routing: Slot 0 → Master (1.0), Slot 1 → Master (1.0), Slot 2 → Master (1.0), all others zeroed
 
 ### 3b. Bridge (`src/bridge.rs`)
 
@@ -554,7 +555,7 @@ pub struct PluginState {
 **Factory presets (small initial set):**
 
 ```rust
-pub fn preset_default() -> PluginState { /* Slot 0 = Dynamics, Slot 1 = Gain, both → Master */ }
+pub fn preset_default() -> PluginState { /* Slot 0 = Dynamics, Slot 1 = Dynamics, Slot 2 = Gain, all → Master */ }
 pub fn preset_transient_sculptor() -> PluginState { /* Dyn → T/S → [Frz(S), Gn(T)] → M */ }
 pub fn preset_spectral_width() -> PluginState { /* Dyn(Mid) + Dyn(Side) → M/S → M */ }
 pub fn preset_phase_sculptor() -> PluginState { /* Dyn → Smear → Contrast → M */ }
