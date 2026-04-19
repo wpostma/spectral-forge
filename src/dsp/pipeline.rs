@@ -124,13 +124,20 @@ impl Pipeline {
         let output_gain_db    = params.output_gain.smoothed.next_step(block_size);
 
         // ── Read all 9×7 slot curves from triple-buffer + apply tilt/offset ──
-        {
-            let slot_curve_meta = params.slot_curve_meta.lock();
+        // Non-blocking read; skip tilt/offset adjustment this block if GUI holds lock.
+        if let Some(meta) = params.slot_curve_meta.try_lock() {
             for s in 0..9 {
                 for c in 0..7 {
                     self.slot_curve_cache[s][c].copy_from_slice(shared.curve_rx[s][c].read());
-                    let (tilt, offset) = slot_curve_meta[s][c];
+                    let (tilt, offset) = meta[s][c];
                     apply_curve_transform(&mut self.slot_curve_cache[s][c], tilt, offset);
+                }
+            }
+        } else {
+            // Lock contended: just refresh curve values without tilt/offset
+            for s in 0..9 {
+                for c in 0..7 {
+                    self.slot_curve_cache[s][c].copy_from_slice(shared.curve_rx[s][c].read());
                 }
             }
         }
@@ -220,17 +227,25 @@ impl Pipeline {
         };
 
         // Build sc_args: per-slot sidechain reference (no allocation)
-        let slot_sidechain_arr = *params.slot_sidechain.lock();
+        let slot_sidechain_arr: [u8; 9] = params.slot_sidechain.try_lock()
+            .map(|g| *g)
+            .unwrap_or([255u8; 9]);  // fallback: no sidechain for any slot
         let sc_envelopes_ref: [&[f32]; 4] = std::array::from_fn(|i| self.sc_envelopes[i].as_slice());
         let sc_args: [Option<&[f32]>; 9] = std::array::from_fn(|s| {
             let idx = slot_sidechain_arr[s];
-            let i = if idx == 255 { 0 } else { idx as usize };
-            if i < 4 && sc_active_flags[i] { Some(sc_envelopes_ref[i]) } else { None }
+            if idx == 255 {
+                None  // no sidechain assigned to this slot
+            } else {
+                let i = idx as usize;
+                if i < 4 && sc_active_flags[i] { Some(sc_envelopes_ref[i]) } else { None }
+            }
         });
 
         // Snapshot of slot targets
-        let slot_targets_snap: [crate::params::FxChannelTarget; 9] =
-            *params.slot_targets.lock();
+        use crate::params::FxChannelTarget;
+        let slot_targets_snap: [FxChannelTarget; 9] = params.slot_targets.try_lock()
+            .map(|g| *g)
+            .unwrap_or([FxChannelTarget::All; 9]);
 
         // Delta monitor: write dry samples into the ring buffer at the current write head.
         if delta_monitor {
