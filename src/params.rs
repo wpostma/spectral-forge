@@ -100,6 +100,10 @@ pub struct SpectralForgeParams {
 
     /// 8×8 send matrix. send[src][dst] = linear amplitude [0..1].
     /// src < dst: forward send (current hop). src > dst: feedback (one-hop delayed).
+    /// Slot 0 always receives the plugin's main audio input unconditionally — the matrix
+    /// controls additional sends *between* slots, not the initial signal path. A fully-zeroed
+    /// matrix is therefore valid: slot 0 still processes the input, and its output is the
+    /// plugin's main output (last active slot wins).
     #[persist = "fx_route_matrix"]
     pub fx_route_matrix: Arc<Mutex<[[f32; 8]; 8]>>,
 
